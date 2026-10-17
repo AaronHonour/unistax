@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from unistax.agents.api.limits import rate_limit
 from unistax.agents.api.middleware import RequestHardeningMiddleware
 from unistax.agents.api.routers.agents import (
+    datasource_router,
     discovery_router,
     knowledge_router,
     management_router,
@@ -94,6 +95,7 @@ def create_agent_api(
         workflows_router,
         knowledge_router,
         metrics_router,
+        datasource_router,
     ):
         api.include_router(router)
     app.include_router(api)
@@ -109,7 +111,11 @@ def create_agent_api(
         is_ready = runtime.ready and db_ok
         if not is_ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {"status": "ready" if is_ready else "unavailable", "database": db_ok}
+        return {
+            "status": "ready" if is_ready else "unavailable",
+            "database": db_ok,
+            "datasource": runtime.datasource_state,
+        }
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:

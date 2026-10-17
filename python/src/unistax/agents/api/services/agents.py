@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from unistax.agents.base import Agent, Skill
 from unistax.agents.personas.data_analyst import DataAnalystAgent
@@ -55,8 +56,12 @@ def build_agent(
     team_id: str | None = None,
     skills: dict[str, float] | None = None,
     max_concurrent_tasks: int = 3,
+    datasource: Any = None,
 ) -> Agent:
     factory = PERSONAS[persona]
+    extra: dict[str, Any] = {}
+    if getattr(factory, "USES_DATASOURCE", False):
+        extra["datasource"] = datasource
     return factory(
         agent_id=agent_id,
         event_bus=event_bus,
@@ -64,4 +69,5 @@ def build_agent(
         team_id=team_id,
         skills=to_skills(skills) if skills else None,
         max_concurrent_tasks=max_concurrent_tasks,
+        **extra,
     )

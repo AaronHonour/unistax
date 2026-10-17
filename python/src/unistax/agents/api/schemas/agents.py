@@ -37,4 +37,6 @@ class AgentResponse(BaseModel):
     active_tasks: list[str]
     queued_tasks: int
     supported_task_types: list[str]
+    data_source: str | None = None
+    data_source_tasks: list[str] = []
     metrics: dict[str, Any]

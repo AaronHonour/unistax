@@ -8,12 +8,15 @@ Specialized agent for data governance and stewardship tasks including:
 - Documentation and standards
 """
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
+
+if TYPE_CHECKING:
+    from unistax.agents.connectors.postgres import PostgresDataSource
 
 logger = get_logger(__name__)
 
@@ -51,6 +54,12 @@ class DataStewardAgent(Agent):
         >>> registry.register(steward)
     """
 
+    #: Task types that inspect a real data source when one is attached.
+    DATASOURCE_TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {"catalog_dataset", "document_schema", "classify_data"}
+    )
+    USES_DATASOURCE: ClassVar[bool] = True
+
     TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "catalog_dataset",
@@ -70,6 +79,7 @@ class DataStewardAgent(Agent):
         metrics_manager: MetricsManager | None = None,
         skills: list[Skill] | None = None,
         team_id: str | None = None,
+        datasource: "PostgresDataSource | None" = None,
         **kwargs,
     ):
         """Initialize Data Steward agent.
@@ -80,6 +90,9 @@ class DataStewardAgent(Agent):
             metrics_manager: Shared MetricsManager for metrics
             skills: Custom skills (uses defaults if None)
             team_id: Team this agent belongs to
+            datasource: Read-only PostgreSQL data source. With one, ``catalog_dataset``,
+                ``document_schema`` and ``classify_data`` inspect the real database;
+                without one they return simulated results (marked ``"simulated"``).
             **kwargs: Additional Agent constructor arguments
         """
         # Default skills for Data Steward
@@ -105,6 +118,7 @@ class DataStewardAgent(Agent):
         )
 
         # Data Steward specific attributes
+        self.datasource = datasource
         self.datasets_cataloged: set[str] = set()
         self.policies_enforced: int = 0
         self.compliance_checks: int = 0
@@ -192,15 +206,33 @@ class DataStewardAgent(Agent):
     # Task execution methods
     # ========================================================================
 
+    async def _finish_real(self, outcome: Any) -> dict[str, Any]:
+        """Record what a real task learned in the knowledge graph and return its result."""
+        result = dict(outcome.result)
+        result["knowledge_graph"] = await self.record_knowledge(outcome.nodes, outcome.edges)
+        return result
+
     async def _catalog_dataset(self, context: dict[str, Any]) -> dict[str, Any]:
         """Add dataset to data catalog.
 
+        With a data source this reads table metadata from PostgreSQL (one table, or every
+        in-scope table when no ``name`` is given); otherwise the result is simulated.
+
         Args:
-            context: Dataset cataloging specification
+            context: Dataset cataloging specification (``name``, optional ``schema``)
 
         Returns:
             Cataloging result
         """
+        if self.datasource is not None:
+            from unistax.agents.connectors import tasks
+
+            result = await self._finish_real(await tasks.catalog_dataset(self.datasource, context))
+            for entry in result.get("tables", [result]):
+                if entry.get("dataset_name"):
+                    self.datasets_cataloged.add(entry["dataset_name"])
+            return result
+
         dataset_name = context.get("name", "")
         source = context.get("source", "")
 
@@ -218,6 +250,7 @@ class DataStewardAgent(Agent):
 
         return {
             "status": "success",
+            "data_source": "simulated",
             "dataset_name": dataset_name,
             "source": source,
             "schema": {
@@ -357,6 +390,11 @@ class DataStewardAgent(Agent):
         Returns:
             Documentation result
         """
+        if self.datasource is not None:
+            from unistax.agents.connectors import tasks
+
+            return await self._finish_real(await tasks.document_schema(self.datasource, context))
+
         table = context.get("table", "")
 
         logger.info(f"{self.agent_id} documenting schema for: {table}")
@@ -371,6 +409,7 @@ class DataStewardAgent(Agent):
 
         return {
             "status": "success",
+            "data_source": "simulated",
             "table": table,
             "columns_documented": 18,
             "documentation": {
@@ -448,6 +487,11 @@ class DataStewardAgent(Agent):
         Returns:
             Classification result
         """
+        if self.datasource is not None:
+            from unistax.agents.connectors import tasks
+
+            return await self._finish_real(await tasks.classify_data(self.datasource, context))
+
         dataset = context.get("dataset", "")
 
         logger.info(f"{self.agent_id} classifying data: {dataset}")
@@ -462,6 +506,7 @@ class DataStewardAgent(Agent):
 
         return {
             "status": "success",
+            "data_source": "simulated",
             "dataset": dataset,
             "classification": {
                 "sensitivity_level": "high",

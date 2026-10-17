@@ -163,7 +163,7 @@ jobs:
           AGENT_API_TEST_DATABASE_URL: postgresql+asyncpg://agents:agents@localhost:5432/agents_test
         run: |
           cd python
-          pytest tests/agents/api --tb=short -p no:randomly
+          pytest tests/agents/api tests/agents/datasource --tb=short -p no:randomly
 
   all-checks-passed:
     name: All Checks Passed

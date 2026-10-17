@@ -149,7 +149,11 @@ class TestAuthorisation:
 
     def test_health_probes_need_no_auth(self, client):
         assert client.get("/health/live").status_code == 200
-        assert client.get("/health/ready").json() == {"status": "ready", "database": True}
+        assert client.get("/health/ready").json() == {
+            "status": "ready",
+            "database": True,
+            "datasource": "not_configured",
+        }
 
 
 class TestRequestHardening:

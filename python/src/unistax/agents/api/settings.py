@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
-from typing import Any
+from dataclasses import dataclass, field, fields, replace
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from unistax.agents.connectors.postgres import PostgresConfig
 
 ENV_PREFIX = "UNISTAX_AGENT_API_"
 
@@ -25,17 +28,31 @@ class AgentAPISettings:
     """Configuration for the agent API service."""
 
     # Persistence
-    database_url: str = "sqlite+aiosqlite:///./agents.db"
+    database_url: str = field(default="sqlite+aiosqlite:///./agents.db", repr=False)
     auto_migrate: bool = True
     restore_on_start: bool = True
 
     # Authentication (fails closed: a secret is required unless auth is disabled)
     auth_enabled: bool = True
-    jwt_secret: str | None = None
+    jwt_secret: str | None = field(default=None, repr=False)
     jwt_public_key: str | None = None
     jwt_algorithm: str = "HS256"
     jwt_audience: str | None = None
     jwt_issuer: str | None = None
+
+    # Data source the Steward/Engineer agents inspect (read-only PostgreSQL). Server-side
+    # configuration only: callers can never supply or change a connection string.
+    datasource_url: str | None = field(default=None, repr=False)
+    datasource_name: str = "warehouse"
+    datasource_schemas: tuple[str, ...] = ("public",)
+    datasource_tables: tuple[str, ...] = ("*",)
+    datasource_catalog_timeout_ms: int = 5_000
+    datasource_scan_timeout_ms: int = 10_000
+    datasource_sample_rows: int = 1_000
+    datasource_max_scan_rows: int = 100_000
+    datasource_max_tables: int = 200
+    datasource_pool_size: int = 3
+    datasource_session_defaults: bool = True
 
     # HTTP
     api_prefix: str = "/api/v1"
@@ -70,7 +87,7 @@ class AgentAPISettings:
             if raw is None or raw == "":
                 continue
             default = getattr(cls, f.name)
-            if f.name == "cors_origins":
+            if isinstance(default, tuple):
                 values[f.name] = tuple(o.strip() for o in raw.split(",") if o.strip())
             elif isinstance(default, bool):
                 values[f.name] = _to_bool(raw)
@@ -82,6 +99,24 @@ class AgentAPISettings:
                 values[f.name] = raw
 
         return replace(cls(**values), **overrides)
+
+    def datasource_config(self) -> PostgresConfig:
+        """The data source settings as a connector config (requires ``datasource_url``)."""
+        from unistax.agents.connectors.postgres import PostgresConfig
+
+        return PostgresConfig(
+            url=self.datasource_url or "",
+            name=self.datasource_name,
+            schemas=self.datasource_schemas,
+            table_patterns=self.datasource_tables,
+            catalog_timeout_ms=self.datasource_catalog_timeout_ms,
+            scan_timeout_ms=self.datasource_scan_timeout_ms,
+            sample_rows=self.datasource_sample_rows,
+            max_scan_rows=self.datasource_max_scan_rows,
+            max_tables=self.datasource_max_tables,
+            pool_size=self.datasource_pool_size,
+            session_defaults=self.datasource_session_defaults,
+        )
 
     def validate(self) -> None:
         """Raise ``ValueError`` for configurations that are unsafe or unusable."""
@@ -104,5 +139,7 @@ class AgentAPISettings:
             raise ValueError("api_prefix must start with '/' and must not end with '/'")
         if self.max_running_tasks < 1:
             raise ValueError("max_running_tasks must be >= 1")
+        if self.datasource_url:
+            self.datasource_config().validate()
         if self.priority_aging_seconds < 0:
             raise ValueError("priority_aging_seconds must be >= 0 (0 = strict priority)")

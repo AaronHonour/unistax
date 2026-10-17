@@ -27,6 +27,13 @@ from unistax.agents.intelligence.knowledge_graph import KnowledgeEdge, Knowledge
 from unistax.agents.team import Team
 
 
+def _data_source_label(runtime: AgentRuntime, agent: Agent) -> str | None:
+    """Where this agent's data-aware tasks get their data: a data source or ``simulated``."""
+    if not getattr(agent, "USES_DATASOURCE", False):
+        return None
+    return runtime.datasource.label if runtime.datasource is not None else "simulated"
+
+
 def agent_response(runtime: AgentRuntime, agent: Agent) -> AgentResponse:
     task_types = getattr(agent, "TASK_TYPES", None)
     return AgentResponse(
@@ -39,6 +46,8 @@ def agent_response(runtime: AgentRuntime, agent: Agent) -> AgentResponse:
         active_tasks=[t.id for t in agent.current_tasks],
         queued_tasks=runtime.executor.load(agent.agent_id),
         supported_task_types=sorted(task_types) if task_types else [],
+        data_source=_data_source_label(runtime, agent),
+        data_source_tasks=sorted(getattr(agent, "DATASOURCE_TASK_TYPES", ())),
         metrics=agent.get_metrics(),
     )
 

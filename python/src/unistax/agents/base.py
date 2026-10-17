@@ -18,7 +18,7 @@ Integrates with unistax infrastructure:
 import asyncio
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -321,8 +321,10 @@ class Agent(ABC):
         self.observations: list[dict[str, Any]] = []
 
         # References to shared systems (injected by registry)
-        self.knowledge_graph = None
-        self.blackboard = None
+        self.knowledge_graph: Any = None
+        self.blackboard: Any = None
+        # Async callback ``(nodes, edges)`` that stores graph changes durably (set by the host).
+        self.knowledge_persister: Callable[[list[Any], list[Any]], Awaitable[None]] | None = None
 
         # Local metrics counters (also tracked in MetricsManager if available)
         self.metrics = {
@@ -475,6 +477,48 @@ class Agent(ABC):
             confidence = (confidence + success_rate) / 2
 
         return True, confidence
+
+    async def record_knowledge(self, nodes: Iterable[Any], edges: Iterable[Any]) -> str:
+        """Share what this agent learned through the knowledge graph.
+
+        Args:
+            nodes: Objects with ``id``, ``node_type`` and ``properties`` (created or updated)
+            edges: Objects with ``source``, ``target``, ``relation`` and ``properties``
+                (added only if that relationship does not already exist)
+
+        Returns:
+            ``"updated"``, ``"not_attached"`` (no graph is connected), or ``"failed"``.
+            Never raises: recording knowledge must not fail the task that produced it.
+        """
+        graph = self.knowledge_graph
+        if graph is None:
+            return "not_attached"
+        from unistax.agents.intelligence.knowledge_graph import NodeType, RelationType
+
+        try:
+            changed_nodes = [
+                graph.add_node(
+                    n.id, NodeType(n.node_type), dict(n.properties), agent_id=self.agent_id
+                )
+                for n in nodes
+            ]
+            new_edges = []
+            for e in edges:
+                relation = RelationType(e.relation)
+                existing = graph.get_outgoing_edges(e.source, relation)
+                if any(x.target_id == e.target for x in existing):
+                    continue
+                new_edges.append(
+                    graph.add_edge(
+                        e.source, e.target, relation, dict(e.properties), agent_id=self.agent_id
+                    )
+                )
+            if self.knowledge_persister is not None:
+                await self.knowledge_persister(changed_nodes, new_edges)
+        except Exception:
+            logger.warning("%s could not record knowledge", self.agent_id, exc_info=True)
+            return "failed"
+        return "updated"
 
     async def receive_message(self, message: Message):
         """Receive message from another agent or system."""

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from enum import Enum
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from unistax.agents.api.auth import Principal, require_operator, require_viewer
-from unistax.agents.api.db.store import as_utc, to_jsonable
 from unistax.agents.api.deps import Paging, Runtime
 from unistax.agents.api.presenters import edge_response, node_response
 from unistax.agents.api.schemas import (
@@ -22,7 +20,6 @@ from unistax.agents.api.schemas import (
     paginate,
 )
 from unistax.agents.intelligence.knowledge_graph import (
-    KnowledgeEdge,
     KnowledgeNode,
     NodeType,
     RelationType,
@@ -60,30 +57,6 @@ def _get_node(runtime: Runtime, node_id: str) -> KnowledgeNode:
     return node
 
 
-async def _persist_node(runtime: Runtime, node: KnowledgeNode) -> None:
-    await runtime.store.upsert_node(
-        id=node.id,
-        node_type=node.node_type.value,
-        properties=to_jsonable(node.properties),
-        created_by=node.created_by,
-        created_at=as_utc(node.created_at),
-        updated_at=as_utc(node.updated_at),
-    )
-
-
-async def _persist_edges(runtime: Runtime, edges: Iterable[KnowledgeEdge]) -> None:
-    for edge in edges:
-        await runtime.store.add_edge(
-            source_id=edge.source_id,
-            target_id=edge.target_id,
-            relation_type=edge.relation_type.value,
-            properties=to_jsonable(edge.properties),
-            weight=edge.weight,
-            created_by=edge.created_by,
-            created_at=as_utc(edge.created_at),
-        )
-
-
 @router.post(
     "/nodes",
     status_code=status.HTTP_201_CREATED,
@@ -103,7 +76,7 @@ async def add_node(
     node = runtime.knowledge_graph.add_node(
         body.node_id, node_type, body.properties, agent_id=principal.subject
     )
-    await _persist_node(runtime, node)
+    await runtime.persist_knowledge([node], [])
     return APIResponse(data=node_response(node), message="Node saved")
 
 
@@ -210,7 +183,7 @@ async def add_edge(
         weight=body.weight,
         agent_id=principal.subject,
     )
-    await _persist_edges(runtime, [edge])
+    await runtime.persist_knowledge([], [edge])
     return APIResponse(data=edge_response(edge), message="Edge added")
 
 
@@ -229,8 +202,8 @@ async def add_best_practice(
     node = kg.add_best_practice(
         body.practice_id, body.topic, body.description, principal.subject, body.related_nodes
     )
-    await _persist_node(runtime, node)
-    await _persist_edges(runtime, kg.edges[before:])
+    await runtime.persist_knowledge([node], [])
+    await runtime.persist_knowledge([], kg.edges[before:])
     return APIResponse(data=node_response(node), message="Best practice saved")
 
 
@@ -262,8 +235,8 @@ async def record_issue(
     node = kg.record_issue(
         body.issue_id, body.description, body.severity, body.affected_nodes, principal.subject
     )
-    await _persist_node(runtime, node)
-    await _persist_edges(runtime, kg.edges[before:])
+    await runtime.persist_knowledge([node], [])
+    await runtime.persist_knowledge([], kg.edges[before:])
     return APIResponse(data=node_response(node), message="Issue recorded")
 
 

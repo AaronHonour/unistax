@@ -102,6 +102,13 @@ agents = [
     "numpy>=1.24",
 ]
 
+# Read-only PostgreSQL data source for the Steward/Engineer agents (no web framework needed)
+agents-postgres = [
+    "numpy>=1.24",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+]
+
 # Agent REST/WebSocket API service (single-process; see AGENTS.md > Running the API)
 agents-api = [
     "numpy>=1.24",
@@ -234,6 +241,8 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Security"
 # Routes, request/response schemas and ORM models are documented through their
 # OpenAPI summaries/field names; per-method docstrings would only restate them.
 "src/unistax/agents/api/**" = ["D101", "D102", "D103", "D107"]
+# Long lines are SQL text; wrapping them would make the queries harder to read.
+"src/unistax/agents/connectors/postgres.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"

@@ -680,6 +680,11 @@ AGENT_API_TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost/agents_test
   pytest tests/agents/api
 ```
 
+The data source tests (`tests/agents/datasource`, `tests/agents/api/test_datasource_api.py`)
+need a real PostgreSQL. They use `AGENT_API_TEST_DATABASE_URL` when set (a superuser URL; they
+create and drop their own schema and roles), otherwise an embedded server if `pgserver` is
+installed (`pip install pgserver`), otherwise they are skipped.
+
 The suite covers the cognitive cycle, skills/tasks, teams and registry, personas,
 orchestration, intelligence modules, and the API (authentication and authorisation,
 rate limiting, request hardening, agents/teams/tasks/workflows/knowledge, restart
@@ -844,10 +849,120 @@ Know these before relying on the service:
   and the knowledge graph are persisted.
 - Rate limits are per caller and per process (idle callers are pruned, so memory follows active callers); terminate TLS and enforce global limits at
   your gateway. Behind a proxy set `FORWARDED_ALLOW_IPS`.
-- Persona task handlers are currently **simulations** that return representative results;
-  they do not touch real warehouses or pipelines until you implement them.
+- Persona task handlers are **simulations** unless noted: with a PostgreSQL data source,
+  `catalog_dataset`, `document_schema`, `classify_data` and `quality_check` are real and read-only
+  (see below); every other task still returns representative made-up results.
 - `unistax.agents.task_integration` (Celery) is a scaffold: the worker task is a placeholder
   and is not used by the API.
+
+## Connecting a PostgreSQL data source
+
+By default the persona handlers return **simulated** results. Point the service at a
+PostgreSQL database and these tasks become real, **read-only** work on your data:
+
+| Agent | Task | What it does |
+|---|---|---|
+| Steward | `catalog_dataset` | Reads table metadata (columns, keys, indexes, comments, size, row estimate). With no `name`, catalogs every in-scope table. |
+| Steward | `document_schema` | Documents each column (type, nullability, default, description) and the table's relationships in both directions. |
+| Steward | `classify_data` | Flags columns that look sensitive (PII, credentials, card numbers, ...) from names and a bounded sample of values; derives a sensitivity level and suggested controls. |
+| Engineer | `quality_check` | Row counts, null rates, foreign-key orphans, duplicate keys and freshness, each bounded and isolated. |
+
+All other tasks (including `execute_query`, which does not exist) are unchanged. There is
+deliberately **no way to submit SQL**: callers name tables, and every query is built by
+the service from the database catalog.
+
+### 1. Create a SELECT-only role
+
+```sql
+CREATE ROLE agent_reader LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+GRANT CONNECT ON DATABASE warehouse TO agent_reader;
+GRANT USAGE ON SCHEMA public TO agent_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO agent_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO agent_reader;
+ALTER ROLE agent_reader SET default_transaction_read_only = on;   -- belt and braces
+```
+
+Metadata tasks (`catalog_dataset`, `document_schema`) work even for tables the role cannot
+`SELECT`; data tasks report `permission denied` for those (and `classify_data` falls back to
+column names).
+
+### 2. Configure the service
+
+```bash
+export UNISTAX_AGENT_API_DATASOURCE_URL='postgresql://agent_reader:...@db.internal:5432/warehouse'
+export UNISTAX_AGENT_API_DATASOURCE_SCHEMAS=public,analytics
+python -m unistax.agents.api
+```
+
+The URL is **server-side configuration only**: it cannot be supplied or changed through the
+API, and it is never returned, logged or included in error messages. Treat it as a secret
+(environment variable or secret store, not a file in the repository).
+
+| Variable (prefix `UNISTAX_AGENT_API_`) | Default | Purpose |
+|---|---|---|
+| `DATASOURCE_URL` | none | `postgresql://...` (`postgres://` and `postgresql+asyncpg://` also accepted). Unset = simulated. |
+| `DATASOURCE_NAME` | `warehouse` | Short name used in results and knowledge-graph ids (`pg:<name>:<schema>.<table>`) |
+| `DATASOURCE_SCHEMAS` | `public` | Comma-separated schemas agents may see. `pg_*` and `information_schema` are refused |
+| `DATASOURCE_TABLES` | `*` | Comma-separated `schema.table` glob patterns narrowing the above |
+| `DATASOURCE_CATALOG_TIMEOUT_MS` / `_SCAN_TIMEOUT_MS` | `5000` / `10000` | Statement timeouts for metadata / data queries |
+| `DATASOURCE_SAMPLE_ROWS` | `1000` | Max rows sampled by `classify_data` |
+| `DATASOURCE_MAX_SCAN_ROWS` | `100000` | Max rows any quality check reads |
+| `DATASOURCE_MAX_TABLES` | `200` | Cap for catalog-everything |
+| `DATASOURCE_POOL_SIZE` | `3` | Concurrent connections; further tasks queue |
+| `DATASOURCE_SESSION_DEFAULTS` | `true` | Send `default_transaction_read_only` as a startup parameter. Set `false` behind PgBouncer in transaction mode (every transaction is still read-only) |
+
+`GET /api/v1/datasource` (operator role) reports the effective scope and limits and runs the
+safety check, so you can validate the setup without running a task. `/health/ready` shows
+`"datasource": "verified" | "unverified" | "not_configured"` (informational: an unreachable
+database does not make the service unready).
+
+### Safety model
+
+Independent layers; any one of them prevents a write:
+
+1. **Role check at startup.** Superusers and members of `pg_write_all_data` are refused: the
+   service will not start. Write privileges on exposed tables only produce a warning.
+2. **Read-only sessions.** Every transaction begins `SET TRANSACTION READ ONLY` (repeatable-read
+   snapshot), and connections default to `default_transaction_read_only=on`.
+3. **Scope.** Only the configured schemas/patterns are reachable; out-of-scope names are
+   rejected without revealing whether they exist. Foreign tables are never read.
+4. **No caller SQL.** Identifiers come from the catalog and are quoted; user input is only ever
+   compared against the catalog or bound as a parameter.
+5. **Limits.** Per-transaction `statement_timeout` and `lock_timeout`, row caps on every scan,
+   truncated sample values, and a bounded connection pool (tasks queue).
+
+Sampled values are analysed in memory and discarded: results contain labels, rates and
+counts, never data values.
+
+### What gets recorded
+
+Agents write what they learn to the knowledge graph (persisted, queryable at
+`/api/v1/knowledge`, restored on restart):
+
+- a **dataset** node per table (`pg:<name>:<schema>.<table>`), with `depends_on` edges to the
+  in-scope tables it references through foreign keys, plus `sensitivity_level`,
+  `contains_pii` and `sensitive_columns` after `classify_data`;
+- an **issue** node per quality finding (deterministic ids, so reruns update rather than
+  duplicate). Findings that a later run shows are fixed become `resolved`; a check that
+  errored or did not run never resolves anything.
+
+### Caveats
+
+- **One data source per service.** Several would need a named-source setting.
+- **Classification is rule-based**: column names plus regular expressions over a sample of
+  the *first* rows (checksum-validated for cards and IBANs). It produces false positives and
+  misses (free-text columns, unusual names). Use it to focus a steward's review, not as a
+  compliance determination.
+- **Row counts are estimates** (`pg_class.reltuples`) unless a check counted them, and checks
+  stop at `DATASOURCE_MAX_SCAN_ROWS`: results say when they may be partial
+  (`possibly_partial`). Freshness on an unindexed column can hit the scan timeout; that check
+  is then reported `errored` and the others still run.
+- Table names are **case-sensitive** and exactly as stored; qualify with `schema.table` or pass
+  `schema` separately.
+- Stored results contain metadata such as column defaults and check-constraint definitions
+  (truncated); keep literals you consider secret out of those.
+- Other task types remain simulated, and `unistax.agents.task_integration` (Celery) is
+  still a placeholder.
 
 ## Intelligence Features
 
@@ -1122,7 +1237,8 @@ agent.htn_planner.add_operator(...)  # agent.htn_planner
 - [x] Docker image + compose, CI job (SQLite + PostgreSQL)
 - [x] Schema migrations (Alembic), priority-ordered scheduling, bounded history, WebSocket rate limits
 - [ ] Resume/retry of interrupted work
-- [ ] Real persona implementations (current handlers are simulations)
+- [x] PostgreSQL data source (read-only): `catalog_dataset`, `document_schema`, `classify_data`, `quality_check`
+- [ ] Real implementations of the remaining persona tasks (orchestrators, ML platforms, query execution)
 
 ### Phase 4: Scale (Future 🔮)
 - [ ] Redis-based distributed messaging

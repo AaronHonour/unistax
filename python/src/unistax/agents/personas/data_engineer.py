@@ -8,12 +8,15 @@ Specialized agent for data engineering tasks including:
 - Infrastructure maintenance
 """
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
+
+if TYPE_CHECKING:
+    from unistax.agents.connectors.postgres import PostgresDataSource
 
 logger = get_logger(__name__)
 
@@ -51,6 +54,10 @@ class DataEngineerAgent(Agent):
         >>> registry.register(engineer)
     """
 
+    #: Task types that inspect a real data source when one is attached.
+    DATASOURCE_TASK_TYPES: ClassVar[frozenset[str]] = frozenset({"quality_check"})
+    USES_DATASOURCE: ClassVar[bool] = True
+
     TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "build_pipeline",
@@ -69,6 +76,7 @@ class DataEngineerAgent(Agent):
         metrics_manager: MetricsManager | None = None,
         skills: list[Skill] | None = None,
         team_id: str | None = None,
+        datasource: "PostgresDataSource | None" = None,
         **kwargs,
     ):
         """Initialize Data Engineer agent.
@@ -79,6 +87,9 @@ class DataEngineerAgent(Agent):
             metrics_manager: Shared MetricsManager for metrics
             skills: Custom skills (uses defaults if None)
             team_id: Team this agent belongs to
+            datasource: Read-only PostgreSQL data source. With one, ``quality_check`` runs
+                real, bounded checks; without one it returns a simulated result (marked
+                ``"simulated"``). Other task types remain simulated.
             **kwargs: Additional Agent constructor arguments
         """
         # Default skills for Data Engineer
@@ -104,6 +115,7 @@ class DataEngineerAgent(Agent):
         )
 
         # Data Engineer specific attributes
+        self.datasource = datasource
         self.pipelines_maintained: set[str] = set()
         self.monitored_tables: set[str] = set()
         self.quality_checks_run: int = 0
@@ -261,6 +273,15 @@ class DataEngineerAgent(Agent):
         Returns:
             Quality check result
         """
+        if self.datasource is not None:
+            from unistax.agents.connectors import tasks
+
+            outcome = await tasks.quality_check(self.datasource, context, self.knowledge_graph)
+            self.quality_checks_run += 1
+            result = dict(outcome.result)
+            result["knowledge_graph"] = await self.record_knowledge(outcome.nodes, outcome.edges)
+            return result
+
         table = context.get("table", "")
         checks = context.get("checks", [])
 
@@ -277,6 +298,7 @@ class DataEngineerAgent(Agent):
 
         return {
             "status": "success",
+            "data_source": "simulated",
             "table": table,
             "checks_passed": len(checks),
             "checks_failed": 0,
