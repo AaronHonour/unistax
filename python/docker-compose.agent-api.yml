@@ -4,20 +4,37 @@
 #
 # The API is deliberately a single replica: it keeps agents, task scheduling and
 # the WebSocket event stream in process memory.
+x-agent-api-env: &agent-api-env
+  UNISTAX_AGENT_API_JWT_SECRET: ${UNISTAX_AGENT_API_JWT_SECRET:?set a signing secret of 32+ characters}
+  UNISTAX_AGENT_API_DATABASE_URL: postgresql+asyncpg://agents:${POSTGRES_PASSWORD:?set a database password}@postgres:5432/agents
+  UNISTAX_AGENT_API_CORS_ORIGINS: ${UNISTAX_AGENT_API_CORS_ORIGINS:-}
+
 services:
+  # One-shot deploy step: brings the schema up to date, then exits. The API itself
+  # runs with AUTO_MIGRATE=false and refuses to start against an out-of-date schema.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-api
+    command: ["python", "-m", "unistax.agents.api.migrate", "upgrade"]
+    environment: *agent-api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   agent-api:
     build:
       context: .
       dockerfile: Dockerfile.agent-api
     environment:
-      UNISTAX_AGENT_API_JWT_SECRET: ${UNISTAX_AGENT_API_JWT_SECRET:?set a signing secret of 32+ characters}
-      UNISTAX_AGENT_API_DATABASE_URL: postgresql+asyncpg://agents:${POSTGRES_PASSWORD:?set a database password}@postgres:5432/agents
-      UNISTAX_AGENT_API_CORS_ORIGINS: ${UNISTAX_AGENT_API_CORS_ORIGINS:-}
+      <<: *agent-api-env
+      UNISTAX_AGENT_API_AUTO_MIGRATE: "false"
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     read_only: true
     tmpfs:

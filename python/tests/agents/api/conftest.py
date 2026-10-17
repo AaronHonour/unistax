@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from unistax.agents.api import AgentAPISettings, Role, create_access_token, create_agent_api
 from unistax.agents.api.db.database import Database
@@ -30,6 +31,7 @@ async def _reset_database(url: str) -> None:
     db = Database(url)
     async with db.engine.begin() as conn:
         await conn.run_sync(ApiBase.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS agent_api_alembic_version"))
     await db.dispose()
 
 

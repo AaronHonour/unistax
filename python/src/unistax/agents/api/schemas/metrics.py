@@ -28,3 +28,4 @@ class SystemMetricsResponse(BaseModel):
     knowledge_nodes: int
     knowledge_edges: int
     websocket_connections: int
+    websocket_pending_auth: int = 0

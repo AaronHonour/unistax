@@ -17,6 +17,7 @@ Integrates with unistax infrastructure:
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -267,6 +268,7 @@ class Agent(ABC):
         team_id: str | None = None,
         team_role: TeamRole = TeamRole.MEMBER,
         max_concurrent_tasks: int = 3,
+        max_history: int = 1000,
     ):
         """Initialize agent.
 
@@ -279,6 +281,8 @@ class Agent(ABC):
             team_id: Team this agent belongs to
             team_role: Role within the team
             max_concurrent_tasks: Maximum parallel tasks
+            max_history: Finished tasks to remember (oldest are dropped). Used for
+                experience-based confidence; counters in ``metrics`` are unaffected.
         """
         self.agent_id = agent_id
         self.persona = persona
@@ -290,7 +294,7 @@ class Agent(ABC):
         # State management
         self.state = AgentState.IDLE
         self.current_tasks: list[Task] = []
-        self.task_history: list[Task] = []
+        self.task_history: deque[Task] = deque(maxlen=max(1, max_history))
         self.start_time = datetime.now()
 
         # Communication via unistax.events

@@ -5,6 +5,7 @@ include LICENSE
 # Include package data
 recursive-include src/unistax *.py
 recursive-include src/unistax py.typed
+recursive-include src/unistax *.mako
 
 # Exclude development files
 exclude .gitignore

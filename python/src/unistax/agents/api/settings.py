@@ -26,7 +26,7 @@ class AgentAPISettings:
 
     # Persistence
     database_url: str = "sqlite+aiosqlite:///./agents.db"
-    auto_create_tables: bool = True
+    auto_migrate: bool = True
     restore_on_start: bool = True
 
     # Authentication (fails closed: a secret is required unless auth is disabled)
@@ -51,6 +51,7 @@ class AgentAPISettings:
 
     # Execution
     max_running_tasks: int = 20
+    priority_aging_seconds: float = 30.0
     shutdown_timeout: float = 15.0
 
     # WebSocket
@@ -103,3 +104,5 @@ class AgentAPISettings:
             raise ValueError("api_prefix must start with '/' and must not end with '/'")
         if self.max_running_tasks < 1:
             raise ValueError("max_running_tasks must be >= 1")
+        if self.priority_aging_seconds < 0:
+            raise ValueError("priority_aging_seconds must be >= 0 (0 = strict priority)")

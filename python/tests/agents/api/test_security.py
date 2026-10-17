@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import jwt as pyjwt
@@ -220,3 +221,20 @@ class TestRequestHardening:
         )
         assert ok.headers.get("access-control-allow-origin") == "https://app.example"
         assert "access-control-allow-origin" not in bad.headers
+
+
+def test_rate_limiter_state_is_pruned_when_callers_go_idle(make_client, settings):
+    from unistax.agents.api import limits as limits_module
+
+    client = make_client(rate_limit=5, rate_limit_window=1)
+    runtime = client.app.state.runtime
+    for i in range(30):
+        client.get(f"{API}/agents", headers=headers_for(settings, Role.VIEWER, f"user-{i}"))
+    assert runtime.limits.general.tracked_keys() == 30
+
+    time.sleep(1.2)  # every window has now expired
+    runtime.limits._next_prune = 0  # skip the once-a-minute throttle
+    client.get(f"{API}/agents", headers=headers_for(settings, Role.VIEWER, "someone-new"))
+
+    assert runtime.limits.general.tracked_keys() == 1
+    assert limits_module.PRUNE_INTERVAL_SECONDS > 0

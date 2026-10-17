@@ -208,3 +208,50 @@ class TestExecution:
         state = wf_state(second, admin, wf)
         assert state["status"] == "failed"
         assert state["steps"][0]["status"] in ("failed", "skipped")
+
+
+class TestAllPersonasThroughTheAPI:
+    def test_each_persona_runs_its_task_types_via_the_api(self, client, admin):
+        from .conftest import submit_task, wait_task
+
+        for agent_id, persona in [
+            ("eng", "engineer"),
+            ("ana", "analyst"),
+            ("sci", "scientist"),
+            ("stw", "steward"),
+        ]:
+            create_agent(client, admin, agent_id, persona)
+
+        expected = {
+            "quality_check": "eng",
+            "analyze_data": "ana",
+            "train_model": "sci",
+            "check_compliance": "stw",
+        }
+        for task_type, agent_id in expected.items():
+            queued = submit_task(client, admin, task_type)
+            done = wait_task(client, admin, queued["task_id"])
+            assert done["status"] == "completed", (task_type, done)
+            assert done["assigned_agent"] == agent_id
+
+    def test_four_persona_workflow(self, client, admin):
+        for agent_id, persona in [("eng", "engineer"), ("sci", "scientist"), ("stw", "steward")]:
+            create_agent(client, admin, agent_id, persona)
+
+        steps = [
+            step("ingest", "build_pipeline", "data_engineer"),
+            step("catalog", "catalog_dataset", "data_steward", deps=["ingest"]),
+            step("train", "train_model", "data_scientist", deps=["ingest"]),
+            step("comply", "check_compliance", "data_steward", deps=["catalog", "train"]),
+        ]
+        wf = create_workflow(client, admin, steps).json()["data"]["workflow_id"]
+        client.post(f"{API}/workflows/{wf}/execute", headers=admin)
+
+        done = wait_workflow(client, admin, wf)
+        assert done["status"] == "completed"
+        agents = {s["step_id"]: s["agent_id"] for s in done["steps"]}
+        assert agents == {"ingest": "eng", "catalog": "stw", "train": "sci", "comply": "stw"}
+
+        comply = {s["step_id"]: s for s in done["steps"]}["comply"]
+        train = {s["step_id"]: s for s in done["steps"]}["train"]
+        assert comply["started_at"] >= train["completed_at"]

@@ -79,11 +79,27 @@ class EventHub:
         self._max_connections = max_connections
         self._queue_size = queue_size
         self._subscribers: set[Subscriber] = set()
+        self._pending_auth = 0
         self._attached = False
 
     @property
     def connection_count(self) -> int:
         return len(self._subscribers)
+
+    @property
+    def pending_auth_count(self) -> int:
+        """Sockets that are connected but have not authenticated yet."""
+        return self._pending_auth
+
+    def begin_auth(self) -> bool:
+        """Reserve a place for a socket waiting to authenticate; False when at the cap."""
+        if self._pending_auth >= self._max_connections:
+            return False
+        self._pending_auth += 1
+        return True
+
+    def end_auth(self) -> None:
+        self._pending_auth = max(0, self._pending_auth - 1)
 
     def attach(self) -> None:
         if self._attached:

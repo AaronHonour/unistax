@@ -35,6 +35,7 @@ async def _system_metrics(runtime: Runtime) -> SystemMetricsResponse:
         knowledge_nodes=stats["total_nodes"],
         knowledge_edges=stats["total_edges"],
         websocket_connections=runtime.hub.connection_count,
+        websocket_pending_auth=runtime.hub.pending_auth_count,
     )
 
 

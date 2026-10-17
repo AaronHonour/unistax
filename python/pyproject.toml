@@ -111,6 +111,7 @@ agents-api = [
     "aiosqlite>=0.19.0",  # SQLite (development)
     "asyncpg>=0.29.0",  # PostgreSQL (production)
     "pyjwt>=2.8.0",
+    "alembic>=1.13.0",  # schema migrations
 ]
 
 # API framework support
@@ -198,6 +199,9 @@ Repository = "https://github.com/AaronHonour/unistax"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"unistax.agents.api.migrations" = ["script.py.mako"]
 
 [tool.black]
 line-length = 100

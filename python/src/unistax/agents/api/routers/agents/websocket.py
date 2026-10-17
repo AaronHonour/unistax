@@ -26,6 +26,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from unistax.agents.api.auth import ANONYMOUS, AuthError, Principal, Role
+from unistax.agents.api.limits import RateLimits
 from unistax.agents.api.runtime import AgentRuntime
 from unistax.agents.api.services.events import KNOWN_EVENT_TYPES, Subscriber
 from unistax.logging import get_logger
@@ -39,6 +40,7 @@ MAX_CLIENT_MESSAGE = 4096
 
 CLOSE_UNAUTHORIZED = 4401
 CLOSE_FORBIDDEN = 4403
+CLOSE_RATE_LIMITED = 4429
 
 
 async def _authenticate(ws: WebSocket, runtime: AgentRuntime) -> Principal | None:
@@ -50,6 +52,13 @@ async def _authenticate(ws: WebSocket, runtime: AgentRuntime) -> Principal | Non
     if header.lower().startswith("bearer "):
         token = header[7:].strip()
     else:
+        # Sockets that connect and then say nothing hold resources until the timeout,
+        # so only a bounded number may wait at once.
+        if not runtime.hub.begin_auth():
+            await ws.close(
+                code=status.WS_1013_TRY_AGAIN_LATER, reason="Too many pending connections"
+            )
+            return None
         try:
             raw = await asyncio.wait_for(ws.receive_text(), runtime.settings.ws_auth_timeout)
             message = json.loads(raw) if len(raw) <= MAX_CLIENT_MESSAGE else {}
@@ -57,6 +66,8 @@ async def _authenticate(ws: WebSocket, runtime: AgentRuntime) -> Principal | Non
                 token = message.get("token")
         except (asyncio.TimeoutError, json.JSONDecodeError, WebSocketDisconnect):
             token = None
+        finally:
+            runtime.hub.end_auth()
 
     if not isinstance(token, str) or not token:
         await ws.close(code=CLOSE_UNAUTHORIZED, reason="Authentication required")
@@ -85,9 +96,14 @@ async def _sender(ws: WebSocket, sub: Subscriber) -> None:
             return
 
 
-async def _receiver(ws: WebSocket, sub: Subscriber) -> None:
+async def _receiver(
+    ws: WebSocket, sub: Subscriber, limits: RateLimits | None = None, rate_key: str = ""
+) -> None:
     while True:
         raw = await ws.receive_text()
+        if limits is not None and not limits.allow("general", rate_key):
+            await ws.close(code=CLOSE_RATE_LIMITED, reason="Rate limit exceeded")
+            return
         if len(raw) > MAX_CLIENT_MESSAGE:
             await ws.send_json({"type": "error", "message": "Message too large"})
             continue
@@ -146,6 +162,10 @@ async def _serve(ws: WebSocket, agent_id: str | None) -> None:
     if principal is None:
         return
 
+    if not runtime.limits.allow("expensive", f"ws-connect:{principal.subject}"):
+        await ws.close(code=CLOSE_RATE_LIMITED, reason="Too many connection attempts")
+        return
+
     sub = runtime.hub.subscribe(can_see_messages=principal.role >= Role.OPERATOR)
     if sub is None:
         await ws.close(code=status.WS_1013_TRY_AGAIN_LATER, reason="Too many connections")
@@ -163,7 +183,7 @@ async def _serve(ws: WebSocket, agent_id: str | None) -> None:
         )
         sender = asyncio.create_task(_sender(ws, sub))
         sender.add_done_callback(_consume_result)
-        await _receiver(ws, sub)
+        await _receiver(ws, sub, runtime.limits, f"ws-msg:{principal.subject}")
     except (WebSocketDisconnect, RuntimeError):
         pass  # client went away, or the socket was closed under us
     finally:

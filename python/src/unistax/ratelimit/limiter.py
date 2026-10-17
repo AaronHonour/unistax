@@ -366,6 +366,37 @@ class RateLimiter:
                 del self._windows[key]
                 logger.info("Reset sliding window for key=%s", key)
 
+    def prune_idle(self) -> int:
+        """Drop per-key state that no longer affects any decision.
+
+        Keys that were last seen more than a window ago (sliding window) or whose
+        bucket has fully refilled (token bucket) behave exactly like a brand-new
+        key, so removing them is lossless. Call periodically on long-running
+        services to keep memory proportional to *active* callers.
+
+        Returns:
+            Number of keys removed
+        """
+        now = time.time()
+        removed = 0
+        if self.algorithm == "token_bucket":
+            for key, bucket in list(self._buckets.items()):
+                refilled = bucket.tokens + (now - bucket.last_refill) * bucket.refill_rate
+                if refilled >= bucket.capacity:
+                    del self._buckets[key]
+                    removed += 1
+        else:
+            cutoff = now - self.window
+            for key, window in list(self._windows.items()):
+                if not window.requests or window.requests[-1] < cutoff:
+                    del self._windows[key]
+                    removed += 1
+        return removed
+
+    def tracked_keys(self) -> int:
+        """Number of keys currently holding state."""
+        return len(self._buckets if self.algorithm == "token_bucket" else self._windows)
+
     def clear_all(self) -> None:
         """Clear all rate limit data.
 

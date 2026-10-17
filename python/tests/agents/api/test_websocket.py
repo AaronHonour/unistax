@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -249,3 +250,67 @@ async def test_hub_marks_slow_subscribers_and_never_blocks_publishers():
 
     assert slow.overflowed and slow.queue.qsize() == 1
     hub.detach()
+
+
+class TestWebSocketLimits:
+    def test_connect_attempts_are_rate_limited(self, make_client, viewer):
+        client = make_client(expensive_rate_limit=2)
+        for _ in range(2):
+            with client.websocket_connect(WS, headers=viewer) as ws:
+                assert ws.receive_json()["type"] == "connected"
+
+        with client.websocket_connect(WS, headers=viewer) as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+        assert exc.value.code == 4429
+
+    def test_client_messages_are_rate_limited(self, make_client, viewer):
+        client = make_client(rate_limit=3)
+        with client.websocket_connect(WS, headers=viewer) as ws:
+            ws.receive_json()
+            for _ in range(3):
+                ws.send_json({"action": "ping"})
+                assert ws.receive_json()["type"] == "pong"
+            ws.send_json({"action": "ping"})
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+        assert exc.value.code == 4429
+
+    def test_limits_can_be_disabled(self, make_client, viewer):
+        client = make_client(rate_limit_enabled=False, rate_limit=1, expensive_rate_limit=1)
+        for _ in range(3):
+            with client.websocket_connect(WS, headers=viewer) as ws:
+                for _ in range(3):
+                    ws.send_json({"action": "ping"})
+                    assert ws.receive_json()["type"] in ("connected", "pong")
+
+    def test_unauthenticated_sockets_are_capped_while_waiting(self, make_client):
+        client = make_client(ws_max_connections=2, ws_auth_timeout=5.0)
+        hub = client.app.state.runtime.hub
+        with client.websocket_connect(WS) as a, client.websocket_connect(WS) as b:
+            for _ in range(100):
+                if hub.pending_auth_count == 2:
+                    break
+                time.sleep(0.02)
+            assert hub.pending_auth_count == 2
+
+            with client.websocket_connect(WS) as c:
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    c.receive_json()
+            assert exc.value.code == 1013
+            a.close()
+            b.close()
+
+        for _ in range(100):
+            if hub.pending_auth_count == 0:
+                break
+            time.sleep(0.02)
+        assert hub.pending_auth_count == 0  # reservations are always released
+
+    def test_pending_reservation_released_after_timeout(self, make_client):
+        client = make_client(ws_auth_timeout=0.2)
+        hub = client.app.state.runtime.hub
+        with client.websocket_connect(WS) as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+        assert hub.pending_auth_count == 0

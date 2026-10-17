@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from unistax.agents.api.db.store import Store, to_jsonable
+from unistax.agents.api.services.priority_gate import PriorityGate
 from unistax.agents.base import Agent, Task, TaskStatus
 from unistax.agents.registry import AgentRegistry
 from unistax.logging import get_logger
@@ -36,8 +37,9 @@ class TaskExecutor:
     def __init__(self, registry: AgentRegistry, store: Store, settings: AgentAPISettings) -> None:
         self._registry = registry
         self._store = store
-        self._global = asyncio.Semaphore(settings.max_running_tasks)
-        self._slots: dict[str, asyncio.Semaphore] = {}
+        self._aging = settings.priority_aging_seconds
+        self._global = PriorityGate(settings.max_running_tasks, self._aging)
+        self._slots: dict[str, PriorityGate] = {}
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._assigned: dict[str, str] = {}
         self._closing = False
@@ -52,8 +54,15 @@ class TaskExecutor:
         return len(self._jobs)
 
     def reset_slots(self, agent_id: str) -> None:
-        """Pick up a changed ``max_concurrent_tasks`` for new work."""
-        self._slots.pop(agent_id, None)
+        """Apply a changed ``max_concurrent_tasks`` (or forget a deleted agent)."""
+        agent = self._registry.get(agent_id)
+        gate = self._slots.get(agent_id)
+        if gate is None:
+            return
+        if agent is None:
+            self._slots.pop(agent_id, None)
+        else:
+            gate.resize(agent.max_concurrent_tasks)
 
     # -- lifecycle --------------------------------------------------------
     async def submit(self, task: Task, agent_id: str, submitted_by: str | None) -> None:
@@ -103,13 +112,13 @@ class TaskExecutor:
             await asyncio.gather(*pending, return_exceptions=True)
 
     # -- execution ---------------------------------------------------------
-    def _slot_for(self, agent: Agent) -> asyncio.Semaphore:
-        slot = self._slots.get(agent.agent_id)
-        if slot is None:
-            slot = self._slots[agent.agent_id] = asyncio.Semaphore(
-                max(1, agent.max_concurrent_tasks)
+    def _slot_for(self, agent: Agent) -> PriorityGate:
+        gate = self._slots.get(agent.agent_id)
+        if gate is None:
+            gate = self._slots[agent.agent_id] = PriorityGate(
+                agent.max_concurrent_tasks, self._aging
             )
-        return slot
+        return gate
 
     async def _run(self, task: Task, agent_id: str) -> None:
         agent = self._registry.get(agent_id)
@@ -118,7 +127,7 @@ class TaskExecutor:
                 await self._finish(task, TaskStatus.FAILED, f"Agent {agent_id} no longer exists")
                 return
 
-            async with self._slot_for(agent), self._global:
+            async with self._slot_for(agent).slot(task.priority), self._global.slot(task.priority):
                 agent = self._registry.get(agent_id)
                 if agent is None:
                     await self._finish(

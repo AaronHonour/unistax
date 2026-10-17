@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from unistax.agents.api import migrate
 from unistax.agents.api.auth import Authenticator
 from unistax.agents.api.db import Database, Store
 from unistax.agents.api.limits import RateLimits
@@ -65,8 +66,9 @@ class AgentRuntime:
 
     # -- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
-        if self.settings.auto_create_tables:
-            await self.db.create_all()
+        if self.settings.auto_migrate:
+            await migrate.upgrade(self.db)
+        await migrate.ensure_current(self.db)
 
         if self.settings.restore_on_start:
             await self._restore_teams()

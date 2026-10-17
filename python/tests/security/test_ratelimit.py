@@ -362,3 +362,75 @@ class TestRateLimiterIntegration:
 
         # Should work now (window expired)
         limiter.check_limit("user:test")
+
+
+@pytest.mark.unit
+@pytest.mark.ratelimit
+class TestPruneIdle:
+    """Idle keys are forgotten so memory follows active callers, not all callers ever seen."""
+
+    def test_sliding_window_drops_only_idle_keys(self, monkeypatch):
+        import time as time_module
+
+        limiter = RateLimiter(limit=5, window=60)
+        clock = [1000.0]
+        monkeypatch.setattr(time_module, "time", lambda: clock[0])
+
+        limiter.is_allowed("old")
+        clock[0] += 61
+        limiter.is_allowed("recent")
+        assert limiter.tracked_keys() == 2
+
+        assert limiter.prune_idle() == 1
+        assert limiter.tracked_keys() == 1
+        assert limiter.get_limit_info("recent").remaining == 4  # untouched
+
+    def test_pruning_never_changes_decisions(self, monkeypatch):
+        import time as time_module
+
+        limiter = RateLimiter(limit=2, window=60)
+        clock = [1000.0]
+        monkeypatch.setattr(time_module, "time", lambda: clock[0])
+
+        limiter.is_allowed("k")
+        limiter.is_allowed("k")
+        assert limiter.prune_idle() == 0  # still inside the window
+        assert limiter.is_allowed("k") is False
+
+        clock[0] += 61
+        limiter.prune_idle()
+        assert limiter.is_allowed("k") is True  # same answer as an unpruned limiter
+
+    def test_token_bucket_drops_refilled_buckets(self, monkeypatch):
+        import time as time_module
+
+        limiter = RateLimiter(limit=10, window=10, algorithm="token_bucket")
+        clock = [1000.0]
+        monkeypatch.setattr(time_module, "time", lambda: clock[0])
+
+        limiter.is_allowed("a", tokens=10)  # drained
+        limiter.is_allowed("b", tokens=1)
+        assert limiter.prune_idle() == 0
+
+        clock[0] += 5  # b refilled, a only half
+        assert limiter.prune_idle() == 1
+        assert limiter.tracked_keys() == 1
+
+        clock[0] += 5
+        assert limiter.prune_idle() == 1
+        assert limiter.tracked_keys() == 0
+
+    def test_many_one_off_callers_do_not_accumulate(self, monkeypatch):
+        import time as time_module
+
+        limiter = RateLimiter(limit=5, window=60)
+        clock = [1000.0]
+        monkeypatch.setattr(time_module, "time", lambda: clock[0])
+
+        for i in range(2000):
+            limiter.is_allowed(f"user:{i}")
+        assert limiter.tracked_keys() == 2000
+
+        clock[0] += 61
+        limiter.prune_idle()
+        assert limiter.tracked_keys() == 0

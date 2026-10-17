@@ -6,11 +6,15 @@ Run a single worker, or enforce a global limit at your gateway as well.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import Depends, HTTPException, Request, Response, status
 
 from unistax.agents.api.auth import Principal, get_principal
 from unistax.agents.api.settings import AgentAPISettings
 from unistax.ratelimit import RateLimiter
+
+PRUNE_INTERVAL_SECONDS = 60.0
 
 
 class RateLimits:
@@ -18,6 +22,7 @@ class RateLimits:
 
     def __init__(self, settings: AgentAPISettings) -> None:
         self.enabled = settings.rate_limit_enabled
+        self._next_prune = time.monotonic() + PRUNE_INTERVAL_SECONDS
         self.general = RateLimiter(
             limit=settings.rate_limit, window=settings.rate_limit_window, algorithm="sliding_window"
         )
@@ -26,6 +31,23 @@ class RateLimits:
             window=settings.rate_limit_window,
             algorithm="sliding_window",
         )
+
+    def maybe_prune(self) -> None:
+        """Forget callers that have been idle for a full window (at most once a minute)."""
+        now = time.monotonic()
+        if now < self._next_prune:
+            return
+        self._next_prune = now + PRUNE_INTERVAL_SECONDS
+        self.general.prune_idle()
+        self.expensive.prune_idle()
+
+    def allow(self, kind: str, key: str) -> bool:
+        """Consume one unit for ``key``; always True when limiting is disabled."""
+        if not self.enabled:
+            return True
+        self.maybe_prune()
+        limiter = self.expensive if kind == "expensive" else self.general
+        return limiter.is_allowed(key)
 
 
 def _enforce(limiter: RateLimiter, key: str, response: Response) -> None:
@@ -52,6 +74,7 @@ async def rate_limit(
     """Router-level dependency: general per-caller limit."""
     limits: RateLimits = request.app.state.runtime.limits
     if limits.enabled:
+        limits.maybe_prune()
         _enforce(limits.general, f"user:{principal.subject}", response)
 
 

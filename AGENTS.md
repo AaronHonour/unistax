@@ -683,7 +683,7 @@ AGENT_API_TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost/agents_test
 The suite covers the cognitive cycle, skills/tasks, teams and registry, personas,
 orchestration, intelligence modules, and the API (authentication and authorisation,
 rate limiting, request hardening, agents/teams/tasks/workflows/knowledge, restart
-persistence, cancellation, shutdown and the WebSocket stream).
+persistence, migrations, priority scheduling, cancellation, shutdown and the WebSocket stream).
 
 ## Running the API (REST + WebSocket)
 
@@ -722,12 +722,13 @@ Environment variables (prefix `UNISTAX_AGENT_API_`); see `settings.py` for the f
 | `JWT_ALGORITHM`, `JWT_AUDIENCE`, `JWT_ISSUER` | `HS256`, none, none | Token validation |
 | `AUTH_ENABLED` | `true` | `false` disables auth entirely (everyone is admin). Never in production |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./agents.db` | Use `postgresql+asyncpg://user:pass@host/db` in production |
-| `AUTO_CREATE_TABLES` | `true` | Creates missing tables at startup; it does not migrate existing ones |
+| `AUTO_MIGRATE` | `true` | Apply pending schema migrations at startup. Set `false` in production: the service then refuses to start unless the schema is current (see Migrations) |
 | `RESTORE_ON_START` | `true` | Rebuild agents, teams and the knowledge graph from the database |
 | `CORS_ORIGINS` | none | Comma-separated origins. `*` is rejected |
 | `RATE_LIMIT`, `RATE_LIMIT_WINDOW` | `120` / `60` | Requests per caller per window |
 | `EXPENSIVE_RATE_LIMIT` | `30` | Tighter cap for starting tasks/workflows |
 | `MAX_RUNNING_TASKS` | `20` | Global cap on concurrently executing tasks |
+| `PRIORITY_AGING_SECONDS` | `30` | Queued tasks gain +1 effective priority per this many seconds waiting; `0` = strict priority |
 | `MAX_REQUEST_BYTES` | `1048576` | Request body limit (413 above it) |
 | `SHUTDOWN_TIMEOUT` | `15` | Seconds running work may finish before being cancelled |
 | `WS_MAX_CONNECTIONS`, `WS_QUEUE_SIZE` | `100` / `256` | WebSocket cap and per-connection backlog |
@@ -772,6 +773,13 @@ the `APIResponse` envelope (`{"success", "data", "message"}`); errors are
   and whose skills meet `required_skills` (best skill match, then least loaded). Unsupported
   types and unmatched skills are `422`.
 - Tasks for a busy agent wait for a free slot (`max_concurrent_tasks`) rather than failing.
+  Waiting tasks are admitted by `priority` (1-10, higher first), first-come-first-served
+  among equals. A queued task gains +1 effective priority per `PRIORITY_AGING_SECONDS`, so
+  low-priority work cannot be starved forever by a steady stream of urgent tasks. Priority
+  orders work *within an agent's queue and the global cap*; it does not preempt running
+  tasks, and it is not applied to workflow steps (they run as their dependencies finish).
+- Each agent remembers its most recent 1000 finished tasks (`max_history`) for
+  experience-based confidence; metrics counters are cumulative and unaffected.
 - Statuses: `pending → in_progress → completed | failed | cancelled`.
 - Workflows are validated on creation (unknown dependencies, cycles, unsupported task
   types are `422`). A failed step marks its dependents `skipped` and the workflow `failed`.
@@ -787,7 +795,9 @@ Then optionally filter: `{"action":"subscribe","event_types":["task_completed"],
 Event types: `task_assigned`, `task_completed`, `task_failed`, `agent_state_changed`,
 `agent_message` (operator+), `collaboration_requested`, `workflow_finished`.
 Slow consumers are disconnected (close code 1013) instead of blocking the service;
-auth failures close with 4401/4403.
+auth failures close with 4401/4403. Connecting counts against the tighter
+`EXPENSIVE_RATE_LIMIT` and every client message against `RATE_LIMIT` (close code 4429
+when exceeded); sockets still waiting to authenticate are capped at `WS_MAX_CONNECTIONS`.
 
 ### Observability
 
@@ -796,12 +806,31 @@ auth failures close with 4401/4403.
 WebSocket connections); scrape it with a bearer token. `/health/live` and `/health/ready`
 (database reachable) are for orchestrator probes.
 
+### Migrations
+
+The schema is managed with Alembic (migrations ship inside the package, with their own
+`agent_api_alembic_version` history table so they never clash with a host application's
+Alembic). With the default `AUTO_MIGRATE=true`, startup applies anything pending - fine for
+development and single-node setups. For production, run migrations as an explicit deploy
+step and let the service verify:
+
+```bash
+export UNISTAX_AGENT_API_DATABASE_URL=postgresql+asyncpg://...
+python -m unistax.agents.api.migrate upgrade     # also: current | check | downgrade
+UNISTAX_AGENT_API_AUTO_MIGRATE=false python -m unistax.agents.api   # refuses to start if behind
+```
+
+A database created by an earlier version (tables but no history) is adopted without data
+loss. When you change a model in `db/models.py`, add a revision under
+`migrations/versions/`; a test fails if the models and migrations disagree.
+`downgrade` drops tables, so it destroys data - take a backup first.
+
 ### Deployment
 
 ```bash
 cd python
 docker build -f Dockerfile.agent-api -t unistax-agent-api .
-docker compose -f docker-compose.agent-api.yml up        # API + PostgreSQL
+docker compose -f docker-compose.agent-api.yml up        # PostgreSQL, one-shot migrate, then the API
 ```
 
 ### Limits
@@ -813,9 +842,7 @@ Know these before relying on the service:
   limits. Horizontal scale needs the Phase 4 items (shared messaging, distributed agents).
 - **No resume after a crash or restart** (see above). Only tasks, workflows, agents, teams
   and the knowledge graph are persisted.
-- **Schema creation only.** `AUTO_CREATE_TABLES` creates missing tables; there are no
-  migrations yet, so schema changes need a manual migration (Alembic is recommended).
-- Rate limits are per caller and per process; terminate TLS and enforce global limits at
+- Rate limits are per caller and per process (idle callers are pruned, so memory follows active callers); terminate TLS and enforce global limits at
   your gateway. Behind a proxy set `FORWARDED_ALLOW_IPS`.
 - Persona task handlers are currently **simulations** that return representative results;
   they do not touch real warehouses or pipelines until you implement them.
@@ -1093,7 +1120,7 @@ agent.htn_planner.add_operator(...)  # agent.htn_planner
 - [x] Database persistence (SQLite/PostgreSQL) for agents, teams, tasks, workflows, knowledge graph
 - [x] Graceful shutdown, restart recovery, health probes, Prometheus metrics
 - [x] Docker image + compose, CI job (SQLite + PostgreSQL)
-- [ ] Schema migrations (Alembic)
+- [x] Schema migrations (Alembic), priority-ordered scheduling, bounded history, WebSocket rate limits
 - [ ] Resume/retry of interrupted work
 - [ ] Real persona implementations (current handlers are simulations)
 
