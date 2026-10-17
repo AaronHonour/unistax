@@ -17,23 +17,28 @@ Integrates with unistax infrastructure:
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 from uuid import uuid4
 
 from unistax.events import Event, EventBus
 from unistax.logging import get_logger
-from unistax.metrics import MetricsManager, counter, timer
+from unistax.metrics import MetricsManager, timer
+
 
 # Note: audit decorator has circular import issue in unistax.audit
 # Placeholder decorator for now
 def audit(action: str):
     """Placeholder audit decorator until circular import is fixed."""
+
     def decorator(func):
         return func
+
     return decorator
+
 
 logger = get_logger(__name__)
 
@@ -96,6 +101,7 @@ class Skill:
         return self.proficiency >= required_proficiency
 
     def __str__(self) -> str:
+        """Return ``name (proficiency)``."""
         return f"{self.name} ({self.proficiency:.2f})"
 
 
@@ -119,19 +125,19 @@ class Task:
     required_skills: dict[str, float] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
     dependencies: list[str] = field(default_factory=list)
-    deadline: Optional[datetime] = None
-    assigned_to: Optional[str] = None
+    deadline: datetime | None = None
+    assigned_to: str | None = None
     reviewed_by: list[str] = field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    result: Any | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    parent_task_id: Optional[str] = None  # For task decomposition
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    parent_task_id: str | None = None  # For task decomposition
     subtasks: list[str] = field(default_factory=list)
 
-    def duration(self) -> Optional[float]:
+    def duration(self) -> float | None:
         """Calculate task duration in seconds."""
         if self.started_at and self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
@@ -165,8 +171,8 @@ class Message:
     msg_type: str = ""  # request, response, broadcast, notification
     content: dict[str, Any] = field(default_factory=dict)
     priority: int = 5
-    reply_to: Optional[str] = None
-    conversation_id: Optional[str] = None
+    reply_to: str | None = None
+    conversation_id: str | None = None
     requires_response: bool = False
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -256,9 +262,9 @@ class Agent(ABC):
         agent_id: str,
         persona: str,
         skills: list[Skill],
-        event_bus: Optional[EventBus] = None,
-        metrics_manager: Optional[MetricsManager] = None,
-        team_id: Optional[str] = None,
+        event_bus: EventBus | None = None,
+        metrics_manager: MetricsManager | None = None,
+        team_id: str | None = None,
         team_role: TeamRole = TeamRole.MEMBER,
         max_concurrent_tasks: int = 3,
     ):
@@ -303,7 +309,7 @@ class Agent(ABC):
         # Collaboration
         self.team_members: set[str] = set()
         self.subordinates: set[str] = set()  # For hierarchical teams
-        self.manager: Optional[str] = None  # For hierarchical teams
+        self.manager: str | None = None  # For hierarchical teams
         self.reputation: float = 1.0  # Peer rating, adjusted by feedback
 
         # Memory and learning
@@ -346,8 +352,17 @@ class Agent(ABC):
 
     def _subscribe_to_events(self):
         """Subscribe to relevant events on the event bus."""
+        self._event_subscriptions: list[tuple[type, Callable]] = []
 
-        @self.event_bus.subscribe(AgentMessageEvent)
+        def _sub(event_type: type) -> Callable:
+            def decorator(func: Callable) -> Callable:
+                self.event_bus.subscribe(event_type)(func)
+                self._event_subscriptions.append((event_type, func))
+                return func
+
+            return decorator
+
+        @_sub(AgentMessageEvent)
         async def on_agent_message(event: AgentMessageEvent):
             """Handle messages sent via event bus."""
             msg = event.message
@@ -357,13 +372,13 @@ class Agent(ABC):
             ):
                 await self.receive_message(msg)
 
-        @self.event_bus.subscribe(TaskAssignedEvent)
+        @_sub(TaskAssignedEvent)
         async def on_task_assigned(event: TaskAssignedEvent):
             """Handle task assignment events."""
             if event.agent_id == self.agent_id:
                 logger.debug(f"{self.agent_id} notified of task assignment: {event.task_id}")
 
-        @self.event_bus.subscribe(CollaborationRequestEvent)
+        @_sub(CollaborationRequestEvent)
         async def on_collaboration_request(event: CollaborationRequestEvent):
             """Handle collaboration requests."""
             # Check if this agent can help with the requested skills
@@ -377,11 +392,40 @@ class Agent(ABC):
                     f"{list(event.required_skills.keys())}"
                 )
 
-    def can_do(self, task: Task) -> tuple[bool, float]:
+    def _track_counter(self, name: str) -> None:
+        """Increment a metric; reporting problems must never affect task outcome."""
+        if not self.metrics_manager:
+            return
+        try:
+            self.metrics_manager.counter(f"{self._metrics_prefix}.{name}")
+        except Exception:
+            logger.warning("Failed to record metric %s", name, exc_info=True)
+
+    def _track_histogram(self, name: str, value: float) -> None:
+        if not self.metrics_manager:
+            return
+        try:
+            self.metrics_manager.histogram(f"{self._metrics_prefix}.{name}", value)
+        except Exception:
+            logger.warning("Failed to record metric %s", name, exc_info=True)
+
+    def unsubscribe_from_events(self) -> None:
+        """Detach this agent's handlers from the event bus.
+
+        Must be called when an agent is discarded, otherwise the bus keeps the
+        agent (and its inbox) alive and keeps delivering messages to it.
+        """
+        for event_type, handler in getattr(self, "_event_subscriptions", []):
+            self.event_bus.unsubscribe(event_type, handler)
+        self._event_subscriptions = []
+
+    def can_do(self, task: Task, check_capacity: bool = True) -> tuple[bool, float]:
         """Check if agent can perform task.
 
         Args:
             task: Task to evaluate
+            check_capacity: Reject when the agent is already at its concurrency
+                limit (pass False when tasks are queued for later execution)
 
         Returns:
             (can_do, confidence_score)
@@ -395,9 +439,7 @@ class Agent(ABC):
         # Check if has required skills
         for skill_name, min_prof in task.required_skills.items():
             if skill_name not in self.skills:
-                logger.debug(
-                    f"{self.agent_id} missing skill: {skill_name} for task {task.id}"
-                )
+                logger.debug(f"{self.agent_id} missing skill: {skill_name} for task {task.id}")
                 return False, 0.0
             if not self.skills[skill_name].can_perform(min_prof):
                 logger.debug(
@@ -407,7 +449,7 @@ class Agent(ABC):
                 return False, 0.0
 
         # Check capacity
-        if len(self.current_tasks) >= self.max_concurrent_tasks:
+        if check_capacity and len(self.current_tasks) >= self.max_concurrent_tasks:
             logger.debug(f"{self.agent_id} at capacity ({self.max_concurrent_tasks} tasks)")
             return False, 0.0
 
@@ -467,9 +509,7 @@ class Agent(ABC):
             await self.event_bus.publish(AgentMessageEvent(message=message))
             self.metrics["messages_sent"] += 1
 
-            # Track in metrics manager if available
-            if self.metrics_manager:
-                self.metrics_manager.increment(f"{self._metrics_prefix}.messages_sent")
+            self._track_counter("messages_sent")
 
             logger.debug(f"{self.agent_id} sent {msg_type} to {to_agent}")
         else:
@@ -492,9 +532,7 @@ class Agent(ABC):
                 message = await asyncio.wait_for(self.inbox.get(), timeout=0.1)
 
                 # Route to appropriate handler
-                handler = self.message_handlers.get(
-                    message.msg_type, self._default_message_handler
-                )
+                handler = self.message_handlers.get(message.msg_type, self._default_message_handler)
                 await handler(message)
                 processed += 1
 
@@ -508,9 +546,7 @@ class Agent(ABC):
 
     async def _default_message_handler(self, message: Message):
         """Default handler for unrecognized message types."""
-        logger.warning(
-            f"{self.agent_id} received unhandled message type: {message.msg_type}"
-        )
+        logger.warning(f"{self.agent_id} received unhandled message type: {message.msg_type}")
 
     async def _handle_request(self, message: Message):
         """Handle request from another agent."""
@@ -563,9 +599,7 @@ class Agent(ABC):
     async def accept_task(self, task: Task):
         """Accept and queue a task for execution."""
         if len(self.current_tasks) >= self.max_concurrent_tasks:
-            logger.warning(
-                f"{self.agent_id} cannot accept task {task.id}: at capacity"
-            )
+            logger.warning(f"{self.agent_id} cannot accept task {task.id}: at capacity")
             return False
 
         task.assigned_to = self.agent_id
@@ -586,7 +620,7 @@ class Agent(ABC):
         return True
 
     @abstractmethod
-    async def decide(self) -> Optional[str]:
+    async def decide(self) -> str | None:
         """Decide what action to take next.
 
         This is the "think" phase of the agent's cognitive cycle.
@@ -687,6 +721,25 @@ class Agent(ABC):
         else:
             logger.warning(f"{self.agent_id} unknown action type: {action_type}")
 
+    async def run_task(self, task: Task) -> Task:
+        """Run an accepted task through the full lifecycle.
+
+        Handles state transitions, metrics and events. Failures are recorded on
+        the task (status/error) rather than raised.
+        """
+        await self._run_task(task)
+        return task
+
+    def release_task(self, task: Task, status: TaskStatus = TaskStatus.CANCELLED) -> None:
+        """Drop a task from the active list (e.g. after external cancellation)."""
+        if task in self.current_tasks:
+            self.current_tasks.remove(task)
+        if not task.is_complete():
+            task.status = status
+            task.completed_at = datetime.now()
+        if not self.current_tasks and self.state == AgentState.WORKING:
+            self.state = AgentState.IDLE
+
     @timer(name="task_execution")
     async def _run_task(self, task: Task):
         """Execute a task with proper state management and error handling."""
@@ -717,13 +770,8 @@ class Agent(ABC):
             self.task_history.append(task)
             self.current_tasks.remove(task)
 
-            # Track metrics
-            if self.metrics_manager:
-                self.metrics_manager.increment(f"{self._metrics_prefix}.tasks_completed")
-                self.metrics_manager.record(
-                    f"{self._metrics_prefix}.task_duration",
-                    task.duration() or 0.0,
-                )
+            self._track_counter("tasks_completed")
+            self._track_histogram("task_duration", task.duration() or 0.0)
 
             # Publish completion event
             if self.event_bus:
@@ -737,10 +785,7 @@ class Agent(ABC):
                     )
                 )
 
-            logger.info(
-                f"{self.agent_id} completed task {task.id} in "
-                f"{task.duration():.2f}s"
-            )
+            logger.info(f"{self.agent_id} completed task {task.id} in " f"{task.duration():.2f}s")
 
         except Exception as e:
             logger.error(f"{self.agent_id} task {task.id} failed: {e}", exc_info=True)
@@ -752,9 +797,7 @@ class Agent(ABC):
             self.task_history.append(task)
             self.current_tasks.remove(task)
 
-            # Track failure metrics
-            if self.metrics_manager:
-                self.metrics_manager.increment(f"{self._metrics_prefix}.tasks_failed")
+            self._track_counter("tasks_failed")
 
             # Publish failure event
             if self.event_bus:
@@ -766,6 +809,23 @@ class Agent(ABC):
                         error=str(e),
                     )
                 )
+
+        finally:
+            await self._return_to_idle()
+
+    async def _return_to_idle(self) -> None:
+        """Leave WORKING once no tasks remain (the run loop does this itself)."""
+        if self.current_tasks or self.state != AgentState.WORKING:
+            return
+        self.state = AgentState.IDLE
+        if self.event_bus:
+            await self.event_bus.publish(
+                AgentStateChangeEvent(
+                    agent_id=self.agent_id,
+                    old_state=AgentState.WORKING.value,
+                    new_state=AgentState.IDLE.value,
+                )
+            )
 
     async def _cleanup(self):
         """Cleanup resources before shutdown."""
@@ -784,9 +844,7 @@ class Agent(ABC):
         """Get agent performance metrics."""
         uptime = (datetime.now() - self.start_time).total_seconds()
         total_tasks = self.metrics["tasks_completed"] + self.metrics["tasks_failed"]
-        success_rate = (
-            self.metrics["tasks_completed"] / total_tasks if total_tasks > 0 else 0.0
-        )
+        success_rate = self.metrics["tasks_completed"] / total_tasks if total_tasks > 0 else 0.0
 
         return {
             **self.metrics,
@@ -798,6 +856,7 @@ class Agent(ABC):
         }
 
     def __repr__(self) -> str:
+        """Return a concise debug representation."""
         return (
             f"Agent(id={self.agent_id}, persona={self.persona}, "
             f"state={self.state.value}, tasks={len(self.current_tasks)})"

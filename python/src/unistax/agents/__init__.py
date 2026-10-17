@@ -33,19 +33,6 @@ from unistax.agents.base import (
     TaskStatus,
     TeamRole,
 )
-from unistax.agents.orchestrator import (
-    AgentOrchestrator,
-    Workflow,
-    WorkflowStatus,
-    WorkflowStep,
-    StepStatus,
-)
-from unistax.agents.personas.data_analyst import DataAnalystAgent
-from unistax.agents.personas.data_engineer import DataEngineerAgent
-from unistax.agents.personas.data_scientist import DataScientistAgent
-from unistax.agents.personas.data_steward import DataStewardAgent
-from unistax.agents.registry import AgentRegistry
-from unistax.agents.team import Team, TeamHierarchy, TeamType
 
 # Intelligence features
 from unistax.agents.intelligence import (
@@ -58,13 +45,24 @@ from unistax.agents.intelligence import (
     RLAgent,
     SwarmAgent,
 )
-
-# API (REST endpoints)
-from unistax.agents.api import create_agent_api, app as agent_api_app
+from unistax.agents.orchestrator import (
+    AgentOrchestrator,
+    StepStatus,
+    Workflow,
+    WorkflowStatus,
+    WorkflowStep,
+)
+from unistax.agents.personas.data_analyst import DataAnalystAgent
+from unistax.agents.personas.data_engineer import DataEngineerAgent
+from unistax.agents.personas.data_scientist import DataScientistAgent
+from unistax.agents.personas.data_steward import DataStewardAgent
+from unistax.agents.registry import AgentRegistry
+from unistax.agents.team import Team, TeamHierarchy, TeamType
 
 # Optional Celery integration (requires celery package)
 try:
     from unistax.agents.task_integration import AgentTaskQueue, AgentTaskScheduler
+
     _HAS_CELERY = True
 except ImportError:
     AgentTaskQueue = None  # type: ignore
@@ -116,7 +114,4 @@ __all__ = [
     "AntColonyOptimizer",
     "ParticleSwarmOptimizer",
     "SwarmAgent",
-    # API
-    "create_agent_api",
-    "agent_api_app",
 ]

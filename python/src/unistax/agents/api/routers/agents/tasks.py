@@ -1,221 +1,105 @@
-"""Task management endpoints."""
+"""Task submission and monitoring endpoints."""
 
-import asyncio
-import uuid
-from datetime import datetime
-from typing import Annotated
+from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from unistax.agents import AgentRegistry, Task, TaskStatus
-from unistax.agents.api.dependencies import get_registry
-from unistax.agents.api.schemas import (
-    TaskListResponse,
-    TaskRequest,
-    TaskResponse,
-    TaskStatusUpdate,
-)
-from unistax.api import APIResponse
-from unistax.logging import get_logger
+from unistax.agents.api.auth import Principal, require_operator, require_viewer
+from unistax.agents.api.db.models import TaskRecord
+from unistax.agents.api.deps import Paging, Runtime
+from unistax.agents.api.limits import expensive_rate_limit
+from unistax.agents.api.presenters import task_response
+from unistax.agents.api.schemas import TaskRequest, TaskResponse, paginate
+from unistax.agents.api.services.assignment import rank_agents, supported_types
+from unistax.agents.api.services.executor import ExecutorClosed
+from unistax.agents.base import Task
+from unistax.api import APIResponse, PaginatedResponse
 
 router = APIRouter(prefix="/tasks", tags=["Task Management"])
-logger = get_logger(__name__)
 
-# In-memory task storage (in production, use database)
-_tasks: dict[str, dict] = {}
+TERMINAL = {"completed", "failed", "cancelled"}
 
 
-def _task_to_response(task_data: dict) -> TaskResponse:
-    """Convert task data to response model.
-
-    Args:
-        task_data: Task data dictionary
-
-    Returns:
-        TaskResponse
-    """
-    return TaskResponse(
-        task_id=task_data["id"],
-        task_type=task_data["type"],
-        description=task_data.get("description"),
-        status=task_data["status"],
-        priority=task_data["priority"],
-        assigned_agent=task_data.get("assigned_agent"),
-        result=task_data.get("result"),
-        error=task_data.get("error"),
-        created_at=task_data["created_at"],
-        started_at=task_data.get("started_at"),
-        completed_at=task_data.get("completed_at"),
-        duration_seconds=task_data.get("duration_seconds"),
-    )
+async def _fetch(runtime: Runtime, task_id: str) -> TaskRecord:
+    record = await runtime.store.get_task(task_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Task '{task_id}' not found")
+    return record
 
 
 @router.post(
     "",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=APIResponse[TaskResponse],
-    status_code=status.HTTP_201_CREATED,
     summary="Submit task",
-    description="Submit a new task for execution by an agent",
+    description="Queues the task for an agent and returns immediately. Poll "
+    "`GET /tasks/{id}` or subscribe to the WebSocket event stream for progress.",
+    dependencies=[Depends(expensive_rate_limit)],
 )
 async def submit_task(
-    request: TaskRequest,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
+    body: TaskRequest,
+    runtime: Runtime,
+    principal: Principal = Depends(require_operator),
 ) -> APIResponse[TaskResponse]:
-    """Submit a new task."""
-    logger.info(f"Submitting task: type={request.task_type}, priority={request.priority}")
-
-    # Generate task ID
-    task_id = str(uuid.uuid4())
-
-    # Create task
     task = Task(
-        id=task_id,
-        type=request.task_type,
-        context=request.context,
-        priority=request.priority,
-        required_skills=request.required_skills or {},
+        type=body.task_type,
+        description=body.description,
+        priority=body.priority,
+        required_skills=body.required_skills or {},
+        context=body.context,
     )
 
-    # Find suitable agent
-    assigned_agent_id = None
+    pinned = None
+    if body.agent_id:
+        pinned = runtime.registry.get(body.agent_id)
+        if pinned is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Agent '{body.agent_id}' not found")
 
-    if request.agent_id:
-        # Specific agent requested
-        if request.agent_id not in registry.agents:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Agent {request.agent_id} not found",
+    candidates = rank_agents(runtime.registry, task, runtime.executor.load, only=pinned)
+    if not candidates:
+        if pinned:
+            detail = f"Agent '{pinned.agent_id}' cannot run '{task.type}' with the required skills"
+        else:
+            detail = (
+                f"No registered agent can run '{task.type}' with the required skills. "
+                f"Supported task types: {supported_types(runtime.registry)}"
             )
-        assigned_agent_id = request.agent_id
-        agent = registry.agents[assigned_agent_id]
-    else:
-        # Find best agent
-        suitable_agents = registry.find_agents_for_task(task)
-        if not suitable_agents:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No suitable agent available for this task",
-            )
-        # Pick agent with highest confidence
-        agent = max(suitable_agents, key=lambda x: x[1])  # (agent, confidence)
-        assigned_agent_id = agent[0].agent_id if isinstance(agent, tuple) else agent.agent_id
-
-    # Store task
-    task_data = {
-        "id": task_id,
-        "type": request.task_type,
-        "description": request.description,
-        "status": "pending",
-        "priority": request.priority,
-        "assigned_agent": assigned_agent_id,
-        "result": None,
-        "error": None,
-        "created_at": datetime.now(),
-        "started_at": None,
-        "completed_at": None,
-        "duration_seconds": None,
-        "task_obj": task,
-    }
-    _tasks[task_id] = task_data
-
-    # Assign task to agent (async execution)
-    asyncio.create_task(_execute_task(task_id, assigned_agent_id, registry))
-
-    logger.info(f"Task {task_id} submitted and assigned to {assigned_agent_id}")
-
-    return APIResponse(
-        success=True,
-        data=_task_to_response(task_data),
-        message=f"Task {task_id} submitted successfully",
-    )
-
-
-async def _execute_task(task_id: str, agent_id: str, registry: AgentRegistry):
-    """Execute task asynchronously.
-
-    Args:
-        task_id: Task ID
-        agent_id: Agent ID
-        registry: Agent registry
-    """
-    task_data = _tasks.get(task_id)
-    if not task_data:
-        return
-
-    agent = registry.agents.get(agent_id)
-    if not agent:
-        task_data["status"] = "failed"
-        task_data["error"] = f"Agent {agent_id} not found"
-        return
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail)
 
     try:
-        # Update status
-        task_data["status"] = "running"
-        task_data["started_at"] = datetime.now()
+        await runtime.executor.submit(task, candidates[0].agent.agent_id, principal.subject)
+    except ExecutorClosed:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Service is shutting down"
+        ) from None
 
-        # Execute task
-        result = await agent.execute_task(task_data["task_obj"])
-
-        # Update completion
-        task_data["status"] = "completed"
-        task_data["result"] = result
-        task_data["completed_at"] = datetime.now()
-
-        if task_data["started_at"]:
-            duration = (task_data["completed_at"] - task_data["started_at"]).total_seconds()
-            task_data["duration_seconds"] = duration
-
-        logger.info(f"Task {task_id} completed successfully")
-
-    except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}")
-        task_data["status"] = "failed"
-        task_data["error"] = str(e)
-        task_data["completed_at"] = datetime.now()
+    return APIResponse(data=task_response(await _fetch(runtime, task.id)), message="Task accepted")
 
 
 @router.get(
     "",
-    response_model=APIResponse[TaskListResponse],
+    response_model=PaginatedResponse[TaskResponse],
     summary="List tasks",
-    description="Get list of all tasks with pagination and filtering",
+    dependencies=[Depends(require_viewer)],
 )
 async def list_tasks(
-    page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
-    status_filter: str | None = Query(None, alias="status", description="Filter by status"),
-    agent_id: str | None = Query(None, description="Filter by agent ID"),
-) -> APIResponse[TaskListResponse]:
-    """List all tasks."""
-    logger.debug(f"Listing tasks: page={page}, page_size={page_size}")
-
-    # Get all tasks
-    tasks = list(_tasks.values())
-
-    # Apply filters
-    if status_filter:
-        tasks = [t for t in tasks if t["status"] == status_filter]
-
-    if agent_id:
-        tasks = [t for t in tasks if t.get("assigned_agent") == agent_id]
-
-    # Sort by created_at (newest first)
-    tasks.sort(key=lambda t: t["created_at"], reverse=True)
-
-    # Pagination
-    total = len(tasks)
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_tasks = tasks[start:end]
-
-    return APIResponse(
-        success=True,
-        data=TaskListResponse(
-            tasks=[_task_to_response(t) for t in page_tasks],
-            total=total,
-            page=page,
-            page_size=page_size,
-        ),
+    runtime: Runtime,
+    paging: Paging,
+    task_status: str | None = Query(None, alias="status"),
+    agent_id: str | None = Query(None),
+    task_type: str | None = Query(None),
+) -> PaginatedResponse[Any]:
+    records, total = await runtime.store.list_tasks(
+        status=task_status,
+        agent_id=agent_id,
+        task_type=task_type,
+        offset=paging.offset,
+        limit=paging.page_size,
+    )
+    return paginate(
+        TaskResponse, [task_response(r) for r in records], paging.page, paging.page_size, total
     )
 
 
@@ -223,90 +107,28 @@ async def list_tasks(
     "/{task_id}",
     response_model=APIResponse[TaskResponse],
     summary="Get task",
-    description="Get details of a specific task by ID",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_task(task_id: str) -> APIResponse[TaskResponse]:
-    """Get task by ID."""
-    logger.debug(f"Getting task: {task_id}")
-
-    task_data = _tasks.get(task_id)
-    if not task_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task {task_id} not found",
-        )
-
-    return APIResponse(success=True, data=_task_to_response(task_data))
+async def get_task(task_id: str, runtime: Runtime) -> APIResponse[TaskResponse]:
+    record = await runtime.store.get_task(task_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Task '{task_id}' not found")
+    return APIResponse(data=task_response(record))
 
 
-@router.patch(
-    "/{task_id}/status",
+@router.post(
+    "/{task_id}/cancel",
     response_model=APIResponse[TaskResponse],
-    summary="Update task status",
-    description="Update the status of a task (for manual intervention)",
-)
-async def update_task_status(
-    task_id: str,
-    update: TaskStatusUpdate,
-) -> APIResponse[TaskResponse]:
-    """Update task status."""
-    logger.info(f"Updating task {task_id} status to {update.status}")
-
-    task_data = _tasks.get(task_id)
-    if not task_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task {task_id} not found",
-        )
-
-    # Update status
-    task_data["status"] = update.status
-
-    if update.result is not None:
-        task_data["result"] = update.result
-
-    if update.error is not None:
-        task_data["error"] = update.error
-
-    if update.status in ["completed", "failed", "cancelled"]:
-        task_data["completed_at"] = datetime.now()
-
-        if task_data["started_at"]:
-            duration = (task_data["completed_at"] - task_data["started_at"]).total_seconds()
-            task_data["duration_seconds"] = duration
-
-    return APIResponse(
-        success=True,
-        data=_task_to_response(task_data),
-        message=f"Task {task_id} status updated to {update.status}",
-    )
-
-
-@router.delete(
-    "/{task_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
     summary="Cancel task",
-    description="Cancel a pending or running task",
+    dependencies=[Depends(require_operator)],
 )
-async def cancel_task(task_id: str) -> None:
-    """Cancel a task."""
-    logger.info(f"Cancelling task: {task_id}")
+async def cancel_task(task_id: str, runtime: Runtime) -> APIResponse[TaskResponse]:
+    record = await runtime.store.get_task(task_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Task '{task_id}' not found")
+    if record.status in TERMINAL:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Task is already {record.status}")
+    if not await runtime.executor.cancel(task_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Task is not active on this server")
 
-    task_data = _tasks.get(task_id)
-    if not task_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task {task_id} not found",
-        )
-
-    if task_data["status"] in ["completed", "failed", "cancelled"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot cancel task in {task_data['status']} state",
-        )
-
-    # Update status
-    task_data["status"] = "cancelled"
-    task_data["completed_at"] = datetime.now()
-
-    logger.info(f"Task {task_id} cancelled successfully")
+    return APIResponse(data=task_response(await _fetch(runtime, task_id)), message="Task cancelled")

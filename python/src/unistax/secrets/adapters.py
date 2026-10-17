@@ -212,8 +212,10 @@ class EnvironmentBackend(SecretBackend):
             >>> keys = backend.list_secrets("DATABASE")
             >>> # Returns keys like 'DATABASE_PASSWORD', 'DATABASE_USERNAME'
         """
-        env_prefix = self._make_env_key(prefix)
-        full_prefix = f"{self.prefix}{env_prefix}" if env_prefix else self.prefix
+        env_prefix = prefix.replace("/", "_").replace(".", "_").replace("-", "_")
+        if not self.case_sensitive:
+            env_prefix = env_prefix.upper()
+        full_prefix = f"{self.prefix}{env_prefix}"
 
         keys = []
         for env_key in os.environ:

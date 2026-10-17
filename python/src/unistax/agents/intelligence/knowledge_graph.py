@@ -10,7 +10,7 @@ Provides knowledge graph capabilities for agents:
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from unistax.logging import get_logger
 
@@ -52,7 +52,7 @@ class KnowledgeNode:
     properties: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
-    created_by: Optional[str] = None  # Agent ID
+    created_by: str | None = None  # Agent ID
 
 
 @dataclass
@@ -65,7 +65,7 @@ class KnowledgeEdge:
     properties: dict[str, Any] = field(default_factory=dict)
     weight: float = 1.0
     created_at: datetime = field(default_factory=datetime.now)
-    created_by: Optional[str] = None  # Agent ID
+    created_by: str | None = None  # Agent ID
 
 
 class AgentKnowledgeGraph:
@@ -100,7 +100,7 @@ class AgentKnowledgeGraph:
         >>> deps = kg.get_dependencies("customers")
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize knowledge graph."""
         self.nodes: dict[str, KnowledgeNode] = {}
         self.edges: list[KnowledgeEdge] = []
@@ -115,8 +115,8 @@ class AgentKnowledgeGraph:
         self,
         node_id: str,
         node_type: NodeType,
-        properties: Optional[dict[str, Any]] = None,
-        agent_id: Optional[str] = None,
+        properties: dict[str, Any] | None = None,
+        agent_id: str | None = None,
     ) -> KnowledgeNode:
         """Add node to knowledge graph.
 
@@ -146,13 +146,12 @@ class AgentKnowledgeGraph:
             )
             self.nodes[node_id] = node
             logger.info(
-                f"Added knowledge node: {node_id} (type={node_type.value}, "
-                f"agent={agent_id})"
+                f"Added knowledge node: {node_id} (type={node_type.value}, " f"agent={agent_id})"
             )
 
         return node
 
-    def get_node(self, node_id: str) -> Optional[KnowledgeNode]:
+    def get_node(self, node_id: str) -> KnowledgeNode | None:
         """Get node by ID.
 
         Args:
@@ -168,9 +167,9 @@ class AgentKnowledgeGraph:
         source_id: str,
         target_id: str,
         relation_type: RelationType,
-        properties: Optional[dict[str, Any]] = None,
+        properties: dict[str, Any] | None = None,
         weight: float = 1.0,
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
     ) -> KnowledgeEdge:
         """Add edge to knowledge graph.
 
@@ -215,7 +214,7 @@ class AgentKnowledgeGraph:
     def get_outgoing_edges(
         self,
         node_id: str,
-        relation_type: Optional[RelationType] = None,
+        relation_type: RelationType | None = None,
     ) -> list[KnowledgeEdge]:
         """Get edges going out from node.
 
@@ -236,7 +235,7 @@ class AgentKnowledgeGraph:
     def get_incoming_edges(
         self,
         node_id: str,
-        relation_type: Optional[RelationType] = None,
+        relation_type: RelationType | None = None,
     ) -> list[KnowledgeEdge]:
         """Get edges coming into node.
 
@@ -310,7 +309,7 @@ class AgentKnowledgeGraph:
     def find_similar_nodes(
         self,
         node_id: str,
-        node_type: Optional[NodeType] = None,
+        node_type: NodeType | None = None,
     ) -> list[str]:
         """Find nodes similar to given node.
 
@@ -328,7 +327,8 @@ class AgentKnowledgeGraph:
         # Filter by type if specified
         if node_type:
             similar = [
-                nid for nid in similar
+                nid
+                for nid in similar
                 if self.nodes.get(nid) and self.nodes[nid].node_type == node_type
             ]
 
@@ -343,15 +343,12 @@ class AgentKnowledgeGraph:
         Returns:
             List of nodes
         """
-        return [
-            node for node in self.nodes.values()
-            if node.node_type == node_type
-        ]
+        return [node for node in self.nodes.values() if node.node_type == node_type]
 
     def query_by_properties(
         self,
         property_filters: dict[str, Any],
-        node_type: Optional[NodeType] = None,
+        node_type: NodeType | None = None,
     ) -> list[KnowledgeNode]:
         """Query nodes by properties.
 
@@ -383,7 +380,7 @@ class AgentKnowledgeGraph:
 
     def get_best_practices(
         self,
-        topic: Optional[str] = None,
+        topic: str | None = None,
     ) -> list[KnowledgeNode]:
         """Get best practices from knowledge graph.
 
@@ -396,10 +393,7 @@ class AgentKnowledgeGraph:
         practices = self.query_by_type(NodeType.BEST_PRACTICE)
 
         if topic:
-            practices = [
-                p for p in practices
-                if p.properties.get("topic") == topic
-            ]
+            practices = [p for p in practices if p.properties.get("topic") == topic]
 
         return practices
 
@@ -409,7 +403,7 @@ class AgentKnowledgeGraph:
         topic: str,
         description: str,
         agent_id: str,
-        related_nodes: Optional[list[str]] = None,
+        related_nodes: list[str] | None = None,
     ) -> KnowledgeNode:
         """Add a best practice to knowledge graph.
 
@@ -506,10 +500,7 @@ class AgentKnowledgeGraph:
 
         edge_counts = {}
         for relation_type in RelationType:
-            count = len([
-                e for e in self.edges
-                if e.relation_type == relation_type
-            ])
+            count = len([e for e in self.edges if e.relation_type == relation_type])
             if count > 0:
                 edge_counts[relation_type.value] = count
 

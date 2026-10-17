@@ -44,6 +44,14 @@ class InMemoryStorage(Storage):
         if key in self._store:
             del self._store[key]
 
+    def delete(self, key: str) -> None:
+        """Delete the counter for key."""
+        self.reset(key)
+
+    def clear(self) -> None:
+        """Delete all counters."""
+        self._store.clear()
+
 
 class RedisStorage(Storage):
     """Redis storage backend for distributed rate limiting."""

@@ -35,7 +35,6 @@ from unistax.agents.intelligence import (
     TaskType,
 )
 
-
 # ============================================================================
 # Reinforcement Learning Tests
 # ============================================================================
@@ -45,161 +44,140 @@ class TestAgentRLPolicy:
     """Test Reinforcement Learning policy."""
 
     def test_rl_policy_initialization(self):
-        """Test RL policy creation."""
-        policy = AgentRLPolicy(
-            state_features=["queue_size", "cpu_usage"],
-            actions=["process_task", "wait", "delegate"],
-        )
+        policy = AgentRLPolicy(agent_id="a1")
 
-        assert policy.state_features == ["queue_size", "cpu_usage"]
-        assert policy.actions == ["process_task", "wait", "delegate"]
+        assert policy.agent_id == "a1"
         assert policy.learning_rate == 0.1
         assert policy.discount_factor == 0.95
         assert len(policy.q_table) == 0
 
-    def test_get_set_q_value(self):
-        """Test Q-value storage and retrieval."""
-        policy = AgentRLPolicy(
-            state_features=["load"],
-            actions=["action_a", "action_b"],
-        )
-
+    def test_get_and_update_q_value(self):
+        policy = AgentRLPolicy(agent_id="a1")
         state = {"load": 0.5}
 
-        # Initial Q-value should be 0
-        q_val = policy.get_q_value(state, "action_a")
-        assert q_val == 0.0
+        assert policy.get_q_value(state, "action_a") == 0.0
 
-        # Set Q-value
-        policy.set_q_value(state, "action_a", 1.5)
-
-        # Retrieve Q-value
-        q_val = policy.get_q_value(state, "action_a")
-        assert q_val == 1.5
+        policy.update_q_value(state, "action_a", 1.5)
+        assert policy.get_q_value(state, "action_a") == 1.5
 
     def test_action_selection_exploit(self):
-        """Test action selection in exploit mode."""
-        policy = AgentRLPolicy(
-            state_features=["load"],
-            actions=["action_a", "action_b", "action_c"],
-            exploration_rate=0.0,  # No exploration
-        )
-
+        policy = AgentRLPolicy(agent_id="a1", exploration_rate=0.0)
         state = {"load": 0.5}
 
-        # Set Q-values
-        policy.set_q_value(state, "action_a", 0.5)
-        policy.set_q_value(state, "action_b", 1.5)
-        policy.set_q_value(state, "action_c", 0.8)
+        policy.update_q_value(state, "action_a", 0.5)
+        policy.update_q_value(state, "action_b", 1.5)
+        policy.update_q_value(state, "action_c", 0.8)
 
-        # Should select action_b (highest Q-value)
-        action = policy.select_action(state, training=False)
-        assert action == "action_b"
+        actions = ["action_a", "action_b", "action_c"]
+        assert policy.select_action(state, actions, training=False) == "action_b"
+
+    def test_select_action_requires_actions(self):
+        policy = AgentRLPolicy(agent_id="a1")
+
+        with pytest.raises(ValueError):
+            policy.select_action({"load": 0.5}, [])
 
     def test_learn_from_experience(self):
-        """Test Q-learning update from experience."""
-        policy = AgentRLPolicy(
-            state_features=["load"],
-            actions=["action_a", "action_b"],
-            learning_rate=0.1,
-            discount_factor=0.9,
-        )
-
+        policy = AgentRLPolicy(agent_id="a1", learning_rate=0.1, discount_factor=0.9)
         state = {"load": 0.5}
         next_state = {"load": 0.3}
 
-        # Set initial Q-values
-        policy.set_q_value(state, "action_a", 1.0)
-        policy.set_q_value(next_state, "action_b", 2.0)
+        policy.update_q_value(state, "action_a", 1.0)
+        policy.update_q_value(next_state, "action_b", 2.0)
 
-        # Create experience
-        experience = Experience(
-            state=state,
-            action="action_a",
-            reward=1.0,
-            next_state=next_state,
-            done=False,
-        )
-
-        # Learn from experience
-        policy.learn_from_experience(experience)
-
-        # Q-value should be updated
-        # Q(s,a) = Q(s,a) + α[r + γ·max_a'Q(s',a') - Q(s,a)]
-        # Q(s,a) = 1.0 + 0.1[1.0 + 0.9*2.0 - 1.0]
-        # Q(s,a) = 1.0 + 0.1[1.8] = 1.18
-        new_q = policy.get_q_value(state, "action_a")
-        assert abs(new_q - 1.18) < 0.01
-
-    def test_experience_replay(self):
-        """Test experience replay buffer."""
-        policy = AgentRLPolicy(
-            state_features=["load"],
-            actions=["action_a"],
-            max_replay_size=3,
-        )
-
-        state = {"load": 0.5}
-
-        # Add experiences
-        for i in range(5):
-            exp = Experience(
+        policy.learn_from_experience(
+            Experience(
                 state=state,
                 action="action_a",
-                reward=float(i),
-                next_state=state,
+                reward=1.0,
+                next_state=next_state,
                 done=False,
             )
-            policy.add_experience(exp)
+        )
 
-        # Buffer size should be capped at 3
-        assert len(policy.replay_buffer) == 3
+        # Q = 1.0 + 0.1 * (1.0 + 0.9 * 2.0 - 1.0) = 1.18
+        assert abs(policy.get_q_value(state, "action_a") - 1.18) < 1e-9
 
-        # Should contain most recent experiences (2, 3, 4)
-        rewards = [exp.reward for exp in policy.replay_buffer]
-        assert set(rewards) == {2.0, 3.0, 4.0}
+    def test_terminal_experience_ignores_future_value(self):
+        policy = AgentRLPolicy(agent_id="a1", learning_rate=0.5, discount_factor=0.9)
+        state = {"s": 1}
+        next_state = {"s": 2}
+        policy.update_q_value(next_state, "x", 100.0)
+
+        policy.learn_from_experience(
+            Experience(state=state, action="a", reward=1.0, next_state=next_state, done=True)
+        )
+
+        assert abs(policy.get_q_value(state, "a") - 0.5) < 1e-9
+
+    def test_experience_replay_memory_is_bounded(self):
+        policy = AgentRLPolicy(agent_id="a1", memory_size=3)
+        state = {"load": 0.5}
+
+        for i in range(5):
+            policy.record_experience(state, "a", float(i), state)
+
+        assert len(policy.memory) == 3
+        assert {e.reward for e in policy.memory} == {2.0, 3.0, 4.0}
+        assert policy.total_experiences == 5
+
+    def test_train_on_batch(self):
+        policy = AgentRLPolicy(agent_id="a1")
+        state = {"s": 1}
+
+        assert policy.train_on_batch(batch_size=4)["trained"] is False
+
+        for _ in range(10):
+            policy.record_experience(state, "a", 1.0, state)
+
+        result = policy.train_on_batch(batch_size=4)
+        assert result["trained"] is True
+        assert policy.get_q_value(state, "a") > 0.0
+
+    def test_save_and_load_policy(self, tmp_path):
+        policy = AgentRLPolicy(agent_id="a1")
+        policy.update_q_value({"s": 1}, "a", 0.7)
+        path = str(tmp_path / "policy.json")
+        policy.save_policy(path)
+
+        restored = AgentRLPolicy(agent_id="a1")
+        restored.load_policy(path)
+        assert restored.get_q_value({"s": 1}, "a") == 0.7
 
 
 class TestRLAgent:
-    """Test RL agent mixin."""
+    """Test RL agent mixin (used cooperatively with a real agent class)."""
 
-    def test_rl_agent_initialization(self):
-        """Test RL agent mixin setup."""
+    def _make_agent(self):
+        from unistax.agents import DataEngineerAgent
 
-        class TestAgent(RLAgent):
-            def __init__(self):
-                RLAgent.__init__(
-                    self,
-                    state_features=["queue_size"],
-                    actions=["process", "wait"],
-                )
+        class SmartEngineer(RLAgent, DataEngineerAgent):
+            pass
 
-        agent = TestAgent()
-        assert agent.rl_policy is not None
-        assert agent.rl_policy.state_features == ["queue_size"]
+        return SmartEngineer("eng_rl")
 
-    def test_rl_agent_stats(self):
-        """Test RL agent statistics."""
+    def test_rl_disabled_by_default(self):
+        agent = self._make_agent()
+        assert agent.rl_policy is None
+        assert agent.rl_enabled is False
 
-        class TestAgent(RLAgent):
-            def __init__(self):
-                RLAgent.__init__(
-                    self,
-                    state_features=["load"],
-                    actions=["a", "b"],
-                )
+    def test_enable_rl_learning(self):
+        agent = self._make_agent()
+        agent.enable_rl_learning(learning_rate=0.2)
 
-        agent = TestAgent()
+        assert agent.rl_enabled is True
+        assert agent.rl_policy.agent_id == "eng_rl"
+        assert agent.rl_policy.learning_rate == 0.2
 
-        # Add some experiences
-        state = {"load": 0.5}
-        exp = Experience(state, "a", 1.0, state, False)
-        agent.rl_policy.add_experience(exp)
+        agent.disable_rl_learning()
+        assert agent.rl_enabled is False
 
-        stats = agent.get_rl_stats()
-        assert "q_table_size" in stats
-        assert "replay_buffer_size" in stats
-        assert stats["replay_buffer_size"] == 1
+    def test_current_state_features(self):
+        agent = self._make_agent()
+        state = agent.get_current_state()
+
+        assert state["tasks_pending"] == 0
+        assert "success_rate" in state
 
 
 # ============================================================================
@@ -504,8 +482,12 @@ class TestHTNPlanner:
 
         # Define primitive operators
         fetch_op = HTNOperator("fetch_data", effects={"data": "fetched"})
-        clean_op = HTNOperator("clean_data", preconditions={"data": "fetched"}, effects={"data": "clean"})
-        analyze_op = HTNOperator("analyze_data", preconditions={"data": "clean"}, effects={"result": "ready"})
+        clean_op = HTNOperator(
+            "clean_data", preconditions={"data": "fetched"}, effects={"data": "clean"}
+        )
+        analyze_op = HTNOperator(
+            "analyze_data", preconditions={"data": "clean"}, effects={"result": "ready"}
+        )
 
         planner.add_operator(fetch_op)
         planner.add_operator(clean_op)
@@ -710,6 +692,34 @@ class TestParticleSwarmOptimizer:
         # Maximum is at [0, 0] with score 0
         assert best_score > -0.1
         assert all(abs(x) < 0.5 for x in best_pos)
+
+
+class TestMixinComposition:
+    """The intelligence mixins combine with each other and with a persona."""
+
+    def test_all_mixins_on_a_real_persona(self):
+        from unistax.agents import DataEngineerAgent
+
+        class FullStack(RLAgent, HTNAgent, SwarmAgent, DataEngineerAgent):
+            pass
+
+        agent = FullStack("eng_full", team_id=None)
+
+        assert agent.agent_id == "eng_full" and agent.persona == "data_engineer"
+        agent.enable_rl_learning()
+        agent.setup_aco(n_ants=3)
+        assert agent.rl_enabled and agent.aco is not None
+        assert agent.htn_planner.get_statistics()["operators"] == 0
+        assert agent.get_swarm_stats()["aco"]["n_ants"] == 3
+
+    def test_mixin_order_does_not_matter(self):
+        from unistax.agents import DataAnalystAgent
+
+        class Reordered(SwarmAgent, HTNAgent, RLAgent, DataAnalystAgent):
+            pass
+
+        agent = Reordered("ana_full")
+        assert agent.persona == "data_analyst" and agent.htn_planner is not None
 
 
 class TestSwarmAgent:

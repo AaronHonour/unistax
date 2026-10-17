@@ -10,7 +10,6 @@ Supports:
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 from uuid import uuid4
 
 from unistax.logging import get_logger
@@ -51,9 +50,9 @@ class Team:
     id: str = field(default_factory=lambda: str(uuid4()))
     name: str = ""
     team_type: TeamType = TeamType.FUNCTIONAL
-    leader_id: Optional[str] = None  # Team lead agent
+    leader_id: str | None = None  # Team lead agent
     members: set[str] = field(default_factory=set)
-    parent_team_id: Optional[str] = None  # For hierarchical structure
+    parent_team_id: str | None = None  # For hierarchical structure
     child_teams: set[str] = field(default_factory=set)
     created_at: datetime = field(default_factory=datetime.now)
     metadata: dict = field(default_factory=dict)
@@ -108,6 +107,7 @@ class Team:
         return len(self.all_members(include_leader=True))
 
     def __repr__(self) -> str:
+        """Return a concise debug representation."""
         return (
             f"Team(name={self.name}, type={self.team_type.value}, "
             f"size={self.size()}, leader={self.leader_id})"
@@ -143,8 +143,8 @@ class TeamHierarchy:
         self,
         name: str,
         team_type: TeamType = TeamType.FUNCTIONAL,
-        leader_id: Optional[str] = None,
-        parent_id: Optional[str] = None,
+        leader_id: str | None = None,
+        parent_id: str | None = None,
     ) -> Team:
         """Create a new team.
 
@@ -179,13 +179,12 @@ class TeamHierarchy:
             self.teams[parent_id].add_child_team(team.id)
 
         logger.info(
-            f"Created team {name} (id={team.id}, type={team_type.value}, "
-            f"parent={parent_id})"
+            f"Created team {name} (id={team.id}, type={team_type.value}, " f"parent={parent_id})"
         )
 
         return team
 
-    def get_team(self, team_id: str) -> Optional[Team]:
+    def get_team(self, team_id: str) -> Team | None:
         """Get team by ID."""
         return self.teams.get(team_id)
 
@@ -210,17 +209,17 @@ class TeamHierarchy:
         self.teams[team_id].add_member(agent_id)
         self.agent_to_team[agent_id] = team_id
 
-    def get_agent_team(self, agent_id: str) -> Optional[Team]:
+    def get_agent_team(self, agent_id: str) -> Team | None:
         """Get team for an agent."""
         team_id = self.agent_to_team.get(agent_id)
         return self.teams.get(team_id) if team_id else None
 
-    def get_team_leader(self, team_id: str) -> Optional[str]:
+    def get_team_leader(self, team_id: str) -> str | None:
         """Get leader of a team."""
         team = self.get_team(team_id)
         return team.leader_id if team else None
 
-    def get_parent_team(self, team_id: str) -> Optional[Team]:
+    def get_parent_team(self, team_id: str) -> Team | None:
         """Get parent team."""
         team = self.get_team(team_id)
         if team and team.parent_team_id:
@@ -235,9 +234,7 @@ class TeamHierarchy:
 
         return [self.teams[child_id] for child_id in team.child_teams if child_id in self.teams]
 
-    def get_all_team_members(
-        self, team_id: str, recursive: bool = False
-    ) -> set[str]:
+    def get_all_team_members(self, team_id: str, recursive: bool = False) -> set[str]:
         """Get all members of a team.
 
         Args:
@@ -321,7 +318,7 @@ class TeamHierarchy:
 
         return metrics
 
-    def visualize_hierarchy(self, root_team_id: Optional[str] = None, indent: int = 0) -> str:
+    def visualize_hierarchy(self, root_team_id: str | None = None, indent: int = 0) -> str:
         """Generate text visualization of team hierarchy.
 
         Args:
@@ -339,17 +336,14 @@ class TeamHierarchy:
             if team:
                 prefix = "  " * indent
                 lines.append(
-                    f"{prefix}📁 {team.name} ({team.team_type.value}) "
-                    f"[{team.size()} members]"
+                    f"{prefix}📁 {team.name} ({team.team_type.value}) " f"[{team.size()} members]"
                 )
 
                 for child_id in team.child_teams:
                     lines.append(self.visualize_hierarchy(child_id, indent + 1))
         else:
             # Visualize all top-level teams
-            top_level_teams = [
-                t for t in self.teams.values() if t.parent_team_id is None
-            ]
+            top_level_teams = [t for t in self.teams.values() if t.parent_team_id is None]
 
             for team in top_level_teams:
                 lines.append(self.visualize_hierarchy(team.id, indent))
@@ -357,4 +351,5 @@ class TeamHierarchy:
         return "\n".join(lines)
 
     def __repr__(self) -> str:
+        """Return a concise debug representation."""
         return f"TeamHierarchy(teams={len(self.teams)}, agents={len(self.agent_to_team)})"

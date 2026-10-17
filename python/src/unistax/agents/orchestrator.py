@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 from uuid import uuid4
 
 from unistax.agents.base import Task, TaskStatus
@@ -57,14 +57,14 @@ class WorkflowStep:
     id: str = field(default_factory=lambda: str(uuid4()))
     name: str = ""
     task: Task = field(default_factory=Task)
-    agent_persona: Optional[str] = None  # Required agent type
-    agent_id: Optional[str] = None  # Specific agent (if assigned)
+    agent_persona: str | None = None  # Required agent type
+    agent_id: str | None = None  # Specific agent (if assigned)
     dependencies: list[str] = field(default_factory=list)  # Step IDs
     status: StepStatus = StepStatus.PENDING
-    result: Optional[Any] = None
-    error: Optional[str] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    result: Any | None = None
+    error: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     retry_count: int = 0
     max_retries: int = 3
 
@@ -101,11 +101,11 @@ class Workflow:
     steps: list[WorkflowStep] = field(default_factory=list)
     status: WorkflowStatus = WorkflowStatus.PENDING
     created_at: datetime = field(default_factory=datetime.now)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def get_step(self, step_id: str) -> Optional[WorkflowStep]:
+    def get_step(self, step_id: str) -> WorkflowStep | None:
         """Get workflow step by ID."""
         return next((s for s in self.steps if s.id == step_id), None)
 
@@ -170,7 +170,7 @@ class AgentOrchestrator:
     def __init__(
         self,
         registry: AgentRegistry,
-        event_bus: Optional[EventBus] = None,
+        event_bus: EventBus | None = None,
     ):
         """Initialize orchestrator.
 
@@ -223,8 +223,7 @@ class AgentOrchestrator:
             if failed_steps:
                 workflow.status = WorkflowStatus.FAILED
                 logger.error(
-                    f"Workflow {workflow.name} failed: "
-                    f"{len(failed_steps)} steps failed"
+                    f"Workflow {workflow.name} failed: " f"{len(failed_steps)} steps failed"
                 )
             else:
                 workflow.status = WorkflowStatus.COMPLETED
@@ -274,7 +273,37 @@ class AgentOrchestrator:
         """
         running_tasks: dict[str, asyncio.Task] = {}
 
+        try:
+            await self._drive_steps(workflow, max_concurrent, running_tasks)
+        except asyncio.CancelledError:
+            for step_task in running_tasks.values():
+                step_task.cancel()
+            await asyncio.gather(*running_tasks.values(), return_exceptions=True)
+            raise
+
+    def _skip_blocked_steps(self, workflow: Workflow) -> None:
+        """Skip pending steps that can never run because a dependency did not complete."""
+        for step in workflow.steps:
+            if step.status != StepStatus.PENDING:
+                continue
+            for dep_id in step.dependencies:
+                dep = workflow.get_step(dep_id)
+                if dep and dep.status in (StepStatus.FAILED, StepStatus.SKIPPED):
+                    step.status = StepStatus.SKIPPED
+                    step.error = f"Skipped: dependency '{dep_id}' did not complete"
+                    break
+
+    async def _drive_steps(
+        self,
+        workflow: Workflow,
+        max_concurrent: int,
+        running_tasks: dict[str, "asyncio.Task[Any]"],
+    ):
         while not self._all_steps_done(workflow):
+            self._skip_blocked_steps(workflow)
+            if self._all_steps_done(workflow):
+                break
+
             # Get steps ready to execute
             ready_steps = workflow.get_ready_steps()
 
@@ -298,9 +327,7 @@ class AgentOrchestrator:
 
                 # Remove completed tasks
                 for task in done:
-                    step_id = next(
-                        sid for sid, t in running_tasks.items() if t == task
-                    )
+                    step_id = next(sid for sid, t in running_tasks.items() if t == task)
                     running_tasks.pop(step_id)
 
             # Small delay if no work to do
@@ -344,16 +371,23 @@ class AgentOrchestrator:
             step.agent_id = agent.agent_id
             step.status = StepStatus.RUNNING
 
-            # Execute task
-            result = await agent.execute_task(step.task)
+            # Run through the full task lifecycle (capacity, state, metrics, events)
+            task = step.task
+            task.error = None
+            task.completed_at = None
+            if not await agent.accept_task(task):
+                raise RuntimeError(f"Agent {agent.agent_id} is at capacity")
+            await agent.run_task(task)
+            if task.status != TaskStatus.COMPLETED:
+                raise RuntimeError(task.error or "Task did not complete")
 
+            result = task.result
             step.result = result
             step.status = StepStatus.COMPLETED
             step.completed_at = datetime.now()
 
             logger.info(
-                f"Step {step.name} completed by {agent.agent_id} "
-                f"(workflow={workflow.name})"
+                f"Step {step.name} completed by {agent.agent_id} " f"(workflow={workflow.name})"
             )
 
         except Exception as e:
@@ -371,8 +405,10 @@ class AgentOrchestrator:
                     f"Retrying step {step.name} "
                     f"(attempt {step.retry_count + 1}/{step.max_retries})"
                 )
-                step.status = StepStatus.PENDING
-                await asyncio.sleep(2 ** step.retry_count)  # Exponential backoff
+                step.status = (
+                    StepStatus.ASSIGNED
+                )  # not PENDING: keeps the main loop from re-starting it
+                await asyncio.sleep(2**step.retry_count)  # Exponential backoff
                 await self._execute_step(workflow, step)
             else:
                 step.status = StepStatus.FAILED
@@ -409,7 +445,7 @@ class AgentOrchestrator:
 
         return None
 
-    def get_workflow(self, workflow_id: str) -> Optional[Workflow]:
+    def get_workflow(self, workflow_id: str) -> Workflow | None:
         """Get workflow by ID.
 
         Args:
@@ -490,12 +526,10 @@ class AgentOrchestrator:
         return {
             "total_workflows": len(self.workflows),
             "active_workflows": len(self.active_workflows),
-            "completed_workflows": len([
-                w for w in self.workflows.values()
-                if w.status == WorkflowStatus.COMPLETED
-            ]),
-            "failed_workflows": len([
-                w for w in self.workflows.values()
-                if w.status == WorkflowStatus.FAILED
-            ]),
+            "completed_workflows": len(
+                [w for w in self.workflows.values() if w.status == WorkflowStatus.COMPLETED]
+            ),
+            "failed_workflows": len(
+                [w for w in self.workflows.values() if w.status == WorkflowStatus.FAILED]
+            ),
         }

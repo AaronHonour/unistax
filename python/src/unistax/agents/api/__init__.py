@@ -1,46 +1,21 @@
-"""Agent Framework REST API.
+"""REST + WebSocket API for the agent framework.
 
-Provides comprehensive REST API endpoints for managing and orchestrating
-autonomous agents.
+Run with::
 
-Quick Start:
-    >>> from unistax.agents.api import create_agent_api
-    >>>
-    >>> app = create_agent_api()
-    >>> # Run with: uvicorn module:app
+    uvicorn --factory unistax.agents.api.app:create_agent_api
 
-Features:
-    - Agent management (CRUD)
-    - Task submission and monitoring
-    - Team management
-    - Agent discovery
-    - Workflow orchestration
-    - Knowledge graph
-    - Metrics and monitoring
-    - WebSocket real-time updates
+Requires the ``agents-api`` extra: ``pip install 'unistax[agents-api]'``.
 """
 
-from unistax.agents.api.app import app, create_agent_api
-from unistax.agents.api.dependencies import (
-    get_event_bus,
-    get_knowledge_graph,
-    get_metrics_manager,
-    get_orchestrator,
-    get_registry,
-    initialize_agent_system,
-    shutdown_agent_system,
-)
+from unistax.agents.api.app import create_agent_api
+from unistax.agents.api.auth import Role, create_access_token
+from unistax.agents.api.runtime import AgentRuntime
+from unistax.agents.api.settings import AgentAPISettings
 
 __all__ = [
-    # Application
-    "app",
+    "AgentAPISettings",
+    "AgentRuntime",
+    "Role",
+    "create_access_token",
     "create_agent_api",
-    # Dependencies
-    "get_registry",
-    "get_knowledge_graph",
-    "get_orchestrator",
-    "get_event_bus",
-    "get_metrics_manager",
-    "initialize_agent_system",
-    "shutdown_agent_system",
 ]

@@ -8,9 +8,9 @@ Specialized agent for data governance and stewardship tasks including:
 - Documentation and standards
 """
 
-from typing import Any, Optional
+from typing import Any, ClassVar
 
-from unistax.agents.base import Agent, AgentState, Skill, Task, TaskStatus
+from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
@@ -51,13 +51,25 @@ class DataStewardAgent(Agent):
         >>> registry.register(steward)
     """
 
+    TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "catalog_dataset",
+            "track_lineage",
+            "check_compliance",
+            "enforce_policy",
+            "document_schema",
+            "audit_access",
+            "classify_data",
+        }
+    )
+
     def __init__(
         self,
         agent_id: str,
-        event_bus: Optional[EventBus] = None,
-        metrics_manager: Optional[MetricsManager] = None,
-        skills: Optional[list[Skill]] = None,
-        team_id: Optional[str] = None,
+        event_bus: EventBus | None = None,
+        metrics_manager: MetricsManager | None = None,
+        skills: list[Skill] | None = None,
+        team_id: str | None = None,
         **kwargs,
     ):
         """Initialize Data Steward agent.
@@ -100,7 +112,7 @@ class DataStewardAgent(Agent):
 
         logger.info(f"Data Steward {agent_id} initialized")
 
-    async def decide(self) -> Optional[str]:
+    async def decide(self) -> str | None:
         """Decide what action to take next.
 
         Decision priority:
@@ -378,9 +390,7 @@ class DataStewardAgent(Agent):
                     "tags": ["audit"],
                 },
             },
-            "relationships": [
-                {"table": "orders", "type": "one_to_many", "key": "customer_id"}
-            ],
+            "relationships": [{"table": "orders", "type": "one_to_many", "key": "customer_id"}],
         }
 
     async def _audit_access(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -491,9 +501,7 @@ class DataStewardAgent(Agent):
         # 4. Audit lineage accuracy
         # 5. Create alerts for issues
 
-        logger.debug(
-            f"{self.agent_id} monitored {len(self.datasets_cataloged)} datasets"
-        )
+        logger.debug(f"{self.agent_id} monitored {len(self.datasets_cataloged)} datasets")
 
     def add_dataset(self, dataset_name: str):
         """Add a dataset to monitor.

@@ -94,15 +94,19 @@ class TestEnvironmentBackend:
 
     def test_case_sensitivity(self):
         """Test case sensitivity modes."""
-        os.environ["MySecret"] = "value"
+        # Environment variable names are case sensitive on POSIX, so
+        # "case insensitive" means keys are upper-cased before lookup.
+        os.environ["MYSECRET"] = "value"
+        try:
+            insensitive = EnvironmentBackend(case_sensitive=False)
+            assert insensitive.get_secret("mysecret") == "value"
+            assert insensitive.get_secret("MySecret") == "value"
 
-        # Case insensitive (default)
-        backend_insensitive = EnvironmentBackend(case_sensitive=False)
-        value = backend_insensitive.get_secret("mysecret")
-        assert value == "value"
-
-        # Cleanup
-        del os.environ["MYSECRET"]  # Uppercased by backend
+            sensitive = EnvironmentBackend(case_sensitive=True)
+            with pytest.raises(SecretNotFound):
+                sensitive.get_secret("mysecret")
+        finally:
+            del os.environ["MYSECRET"]
 
     def test_from_dotenv(self, tmp_path):
         """Test loading from .env file."""

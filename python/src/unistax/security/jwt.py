@@ -186,6 +186,12 @@ class JWT:
         if algorithm.startswith("HS"):
             min_length = {"HS256": 32, "HS384": 48, "HS512": 64}.get(algorithm, 32)
             if len(secret) < min_length:
+                logger.warning(
+                    "JWT secret is too short for %s (%d < %d characters)",
+                    algorithm,
+                    len(secret),
+                    min_length,
+                )
                 warnings.warn(
                     f"Secret for {algorithm} should be at least {min_length} characters. "
                     f"Current length: {len(secret)}. Weak secrets are vulnerable to brute force.",
@@ -238,7 +244,8 @@ class JWT:
             # Add expiration
             if exp is None:
                 exp = self.expiration
-            claims["exp"] = now + timedelta(seconds=exp)
+            if exp is not None:
+                claims["exp"] = now + timedelta(seconds=exp)
 
             # Add not-before if provided
             if nbf is not None:

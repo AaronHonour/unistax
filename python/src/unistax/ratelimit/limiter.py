@@ -184,7 +184,7 @@ class RateLimiter:
             allowed = bucket.consume(tokens)
         else:  # sliding_window
             window = self._get_window(key)
-            allowed = window.is_allowed()
+            allowed = window.is_allowed(tokens)
 
         if not allowed:
             logger.warning(

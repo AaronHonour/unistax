@@ -584,14 +584,12 @@ from unistax.metrics import MetricsManager
 metrics = MetricsManager()  # Track agent performance
 ```
 
-### Security (TODO)
+### Security
 
-```python
-# Future integration:
-# - JWT authentication for agent-to-agent communication
-# - Rate limiting on message sending
-# - Secrets management for database credentials
-```
+The REST API (below) authenticates with JWT bearer tokens (`unistax.security.JWT`),
+enforces role-based access, and rate limits callers (`unistax.ratelimit`). The core
+agent classes themselves do not authenticate: they are in-process objects and trust
+their caller.
 
 ## Best Practices
 
@@ -669,21 +667,160 @@ except Exception as e:
 
 ## Testing
 
-Run the comprehensive test suite:
-
 ```bash
-pytest tests/agents/ -v
+cd python
+pip install -e ".[dev,api,agents-api,security,database]"
+pytest tests            # agent framework, REST/WebSocket API, security (SQLite)
 ```
 
-Test coverage includes:
-- ✅ Agent base class and cognitive cycle
-- ✅ Skills and task matching
-- ✅ Team hierarchy and management
-- ✅ Agent registry and discovery
-- ✅ Data Engineer persona
-- ✅ Data Analyst persona
-- ✅ Inter-agent messaging
-- ✅ Event system integration
+Run the API suite against PostgreSQL (the production database):
+
+```bash
+AGENT_API_TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost/agents_test \
+  pytest tests/agents/api
+```
+
+The suite covers the cognitive cycle, skills/tasks, teams and registry, personas,
+orchestration, intelligence modules, and the API (authentication and authorisation,
+rate limiting, request hardening, agents/teams/tasks/workflows/knowledge, restart
+persistence, cancellation, shutdown and the WebSocket stream).
+
+## Running the API (REST + WebSocket)
+
+`unistax.agents.api` exposes the framework over HTTP and WebSocket. It is a
+**single-process service** backed by a SQL database (see [Limits](#limits)).
+
+### Quick start
+
+```bash
+pip install "unistax[agents-api]"
+
+export UNISTAX_AGENT_API_JWT_SECRET=$(openssl rand -hex 32)   # >= 32 chars, required
+python -m unistax.agents.api                                  # http://0.0.0.0:8000
+
+# an access token for yourself (admin/operator/viewer)
+TOKEN=$(python -m unistax.agents.api.auth --subject me --role admin)
+
+curl -X POST localhost:8000/api/v1/agents -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{"agent_id":"eng_1","persona":"engineer"}'
+curl -X POST localhost:8000/api/v1/tasks  -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"task_type":"quality_check","context":{"table":"orders"}}'
+```
+
+OpenAPI docs are served at `/api/v1/docs`. Embed it instead with
+`create_agent_api(settings)`, or run `uvicorn --factory unistax.agents.api.app:create_agent_api`.
+The service **refuses to start** with authentication enabled and no signing key.
+
+### Configuration
+
+Environment variables (prefix `UNISTAX_AGENT_API_`); see `settings.py` for the full list.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `JWT_SECRET` / `JWT_PUBLIC_KEY` | none (required) | Signing secret (HS*, min 32/48/64 chars) or verification key (RS*/ES*) |
+| `JWT_ALGORITHM`, `JWT_AUDIENCE`, `JWT_ISSUER` | `HS256`, none, none | Token validation |
+| `AUTH_ENABLED` | `true` | `false` disables auth entirely (everyone is admin). Never in production |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./agents.db` | Use `postgresql+asyncpg://user:pass@host/db` in production |
+| `AUTO_CREATE_TABLES` | `true` | Creates missing tables at startup; it does not migrate existing ones |
+| `RESTORE_ON_START` | `true` | Rebuild agents, teams and the knowledge graph from the database |
+| `CORS_ORIGINS` | none | Comma-separated origins. `*` is rejected |
+| `RATE_LIMIT`, `RATE_LIMIT_WINDOW` | `120` / `60` | Requests per caller per window |
+| `EXPENSIVE_RATE_LIMIT` | `30` | Tighter cap for starting tasks/workflows |
+| `MAX_RUNNING_TASKS` | `20` | Global cap on concurrently executing tasks |
+| `MAX_REQUEST_BYTES` | `1048576` | Request body limit (413 above it) |
+| `SHUTDOWN_TIMEOUT` | `15` | Seconds running work may finish before being cancelled |
+| `WS_MAX_CONNECTIONS`, `WS_QUEUE_SIZE` | `100` / `256` | WebSocket cap and per-connection backlog |
+| `DOCS_ENABLED` | `true` | Serve `/api/v1/docs`, `/redoc`, `/openapi.json` |
+
+### Authentication and roles
+
+Send `Authorization: Bearer <jwt>`. Tokens must be signed with the configured key,
+carry `sub` and `exp`, and a `role` (or `roles`) claim:
+
+| Role | Can |
+|---|---|
+| `viewer` | Read everything; subscribe to the event stream |
+| `operator` | + submit/cancel tasks, create/run/cancel workflows, write to the knowledge graph, see `agent_message` events |
+| `admin` | + create/update/delete agents and teams |
+
+Tokens without an expiry, with an unknown role, or signed with another key are rejected.
+`/health/live` and `/health/ready` need no token.
+
+### Endpoints (all under `/api/v1`)
+
+| Area | Endpoints |
+|---|---|
+| Agents | `POST/GET /agents`, `GET/PATCH/DELETE /agents/{id}` |
+| Tasks | `POST /tasks` (202), `GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel` |
+| Teams | `POST/GET /teams`, `GET/PATCH/DELETE /teams/{id}`, `GET /teams/{id}/members` |
+| Discovery | `GET /discovery/by-persona/{p}`, `/by-skill`, `/by-team/{id}`, `POST /discovery/for-task`, `GET /discovery/statistics` |
+| Workflows | `POST/GET /workflows`, `GET /workflows/{id}[/status]`, `POST /workflows/{id}/execute` (202), `POST /workflows/{id}/cancel`, `DELETE /workflows/{id}` |
+| Knowledge | `POST/GET /knowledge/nodes`, `GET /knowledge/nodes/{id}[/edges\|/dependencies\|/consumers\|/producers]`, `POST /knowledge/edges`, `POST/GET /knowledge/best-practices`, `POST /knowledge/issues`, `GET /knowledge/statistics` |
+| Metrics | `GET /metrics/system`, `GET /metrics/agents/{id}`, `GET /metrics/prometheus` |
+| Events | `WS /ws/events`, `WS /ws/agents/{agent_id}` |
+
+List endpoints are paginated (`page`, `page_size` <= 200). Successful responses use
+the `APIResponse` envelope (`{"success", "data", "message"}`); errors are
+`{"detail": ...}` with 401/403/404/409/413/422/429 as appropriate.
+
+### Task and workflow semantics
+
+- `POST /tasks` validates the request, picks an agent, **queues** the task and returns
+  `202` immediately. Poll `GET /tasks/{id}` or watch the event stream.
+- Without `agent_id`, the agent is chosen from those whose persona supports the task type
+  and whose skills meet `required_skills` (best skill match, then least loaded). Unsupported
+  types and unmatched skills are `422`.
+- Tasks for a busy agent wait for a free slot (`max_concurrent_tasks`) rather than failing.
+- Statuses: `pending → in_progress → completed | failed | cancelled`.
+- Workflows are validated on creation (unknown dependencies, cycles, unsupported task
+  types are `422`). A failed step marks its dependents `skipped` and the workflow `failed`.
+- **Restarts do not resume work.** Tasks and workflows that were queued or running when the
+  process stopped are marked `failed` ("Interrupted by server restart" / "...shutdown") so
+  nothing is silently lost or silently re-run.
+
+### WebSocket event stream
+
+Authenticate with the `Authorization` header, or (browsers) send
+`{"action":"auth","token":"<jwt>"}` as the first message. Tokens in the URL are not accepted.
+Then optionally filter: `{"action":"subscribe","event_types":["task_completed"],"agent_id":"eng_1"}`.
+Event types: `task_assigned`, `task_completed`, `task_failed`, `agent_state_changed`,
+`agent_message` (operator+), `collaboration_requested`, `workflow_finished`.
+Slow consumers are disconnected (close code 1013) instead of blocking the service;
+auth failures close with 4401/4403.
+
+### Observability
+
+`X-Request-ID` is accepted/generated, returned, and attached to log records.
+`/metrics/prometheus` exposes gauges (agents, tasks and workflows by status, queue depth,
+WebSocket connections); scrape it with a bearer token. `/health/live` and `/health/ready`
+(database reachable) are for orchestrator probes.
+
+### Deployment
+
+```bash
+cd python
+docker build -f Dockerfile.agent-api -t unistax-agent-api .
+docker compose -f docker-compose.agent-api.yml up        # API + PostgreSQL
+```
+
+### Limits
+
+Know these before relying on the service:
+
+- **One process, one replica.** Agents, scheduling, the event stream and rate-limit counters
+  live in process memory. Running several workers/replicas gives each its own agents and
+  limits. Horizontal scale needs the Phase 4 items (shared messaging, distributed agents).
+- **No resume after a crash or restart** (see above). Only tasks, workflows, agents, teams
+  and the knowledge graph are persisted.
+- **Schema creation only.** `AUTO_CREATE_TABLES` creates missing tables; there are no
+  migrations yet, so schema changes need a manual migration (Alembic is recommended).
+- Rate limits are per caller and per process; terminate TLS and enforce global limits at
+  your gateway. Behind a proxy set `FORWARDED_ALLOW_IPS`.
+- Persona task handlers are currently **simulations** that return representative results;
+  they do not touch real warehouses or pipelines until you implement them.
+- `unistax.agents.task_integration` (Celery) is a scaffold: the worker task is a placeholder
+  and is not used by the API.
 
 ## Intelligence Features
 
@@ -691,50 +828,35 @@ The agent framework includes advanced intelligence capabilities that enable agen
 
 ### Reinforcement Learning
 
-Agents can learn optimal decision-making policies through Q-learning:
+Add Q-learning to any persona by mixing in `RLAgent`:
 
 ```python
-from unistax.agents.intelligence import RLAgent, AgentRLPolicy
+from unistax.agents import DataEngineerAgent
+from unistax.agents.intelligence import RLAgent
 
-# Create agent with RL capabilities
-class SmartAgent(RLAgent, Agent):
-    def __init__(self, agent_id: str, **kwargs):
-        Agent.__init__(self, agent_id, **kwargs)
-        RLAgent.__init__(
-            self,
-            state_features=["queue_size", "cpu_usage", "task_priority"],
-            actions=["process_task", "wait", "delegate", "ask_help"],
-        )
 
-    async def decide(self):
-        # Get current state
-        state = {
-            "queue_size": len(self.current_tasks),
-            "cpu_usage": 0.75,
-            "task_priority": max(t.priority for t in self.current_tasks) if self.current_tasks else 0,
-        }
+class SmartEngineer(RLAgent, DataEngineerAgent):
+    """Engineer that learns which action to take from experience."""
 
-        # Use RL policy to select action
-        action = self.rl_policy.select_action(state, training=True)
 
-        return action
+agent = SmartEngineer("eng_rl")
+agent.enable_rl_learning(learning_rate=0.1, exploration_rate=0.2)
 
-    async def provide_feedback(self, reward: float):
-        # Learn from experience
-        experience = Experience(
-            state=self.last_state,
-            action=self.last_action,
-            reward=reward,
-            next_state=self.current_state,
-            done=False,
-        )
-        self.rl_policy.learn_from_experience(experience)
+state = agent.get_current_state()  # tasks_pending, success_rate, ...
+action = agent.rl_policy.select_action(state, ["process_task", "wait", "delegate"])
+
+# ... perform the action, observe the outcome ...
+reward = agent.calculate_reward(finished_task)
+agent.rl_policy.record_experience(state, action, reward, agent.get_current_state())
+agent.rl_policy.train_on_batch(batch_size=32)  # replay + exploration decay
+
+agent.rl_policy.save_policy("policy.json")  # and .load_policy(...)
 ```
 
 **Key Features:**
 - Q-learning for state-action value estimation
 - Experience replay buffer for batch learning
-- Epsilon-greedy exploration strategy
+- Epsilon-greedy exploration strategy with decay
 - Save/load policies for persistence
 
 ### Knowledge Graph
@@ -922,49 +1044,22 @@ print(f"Best hyperparameters: {best_params}, Score: {best_score}")
 
 ### Using Intelligence Features with Agents
 
-Agents can inherit intelligence capabilities through mixins:
+The mixins are cooperative, so they combine with each other (in any order) and with
+any persona:
 
 ```python
-from unistax.agents import Agent
-from unistax.agents.intelligence import RLAgent, HTNAgent, SwarmAgent
+from unistax.agents import DataEngineerAgent
+from unistax.agents.intelligence import HTNAgent, RLAgent, SwarmAgent
 
-class IntelligentAgent(RLAgent, HTNAgent, SwarmAgent, Agent):
-    """Agent with full intelligence capabilities."""
 
-    def __init__(self, agent_id: str, **kwargs):
-        Agent.__init__(self, agent_id, persona="intelligent", **kwargs)
+class IntelligentEngineer(RLAgent, HTNAgent, SwarmAgent, DataEngineerAgent):
+    pass
 
-        # Initialize RL
-        RLAgent.__init__(
-            self,
-            state_features=["load", "queue_size"],
-            actions=["process", "wait", "delegate"],
-        )
 
-        # Initialize HTN
-        HTNAgent.__init__(self)
-        self._setup_planning_domain()
-
-        # Initialize Swarm
-        SwarmAgent.__init__(self)
-        self.setup_aco(n_ants=10)
-
-    def _setup_planning_domain(self):
-        # Define operators and methods for HTN planning
-        pass
-
-    async def decide(self):
-        # Use RL to decide high-level action
-        state = self._get_state()
-        action = self.rl_policy.select_action(state)
-
-        if action == "process":
-            # Use HTN to plan task decomposition
-            task = self.current_tasks[0]
-            plan = self.htn_planner.plan(task, state)
-            return f"execute_plan:{plan.id}"
-
-        return action
+agent = IntelligentEngineer("eng_1")
+agent.enable_rl_learning()          # agent.rl_policy
+agent.setup_aco(n_ants=10)          # agent.aco
+agent.htn_planner.add_operator(...)  # agent.htn_planner
 ```
 
 ## Roadmap
@@ -981,8 +1076,8 @@ class IntelligentAgent(RLAgent, HTNAgent, SwarmAgent, Agent):
 - [x] Comprehensive tests
 
 ### Phase 2: Advanced Features (Completed ✅)
-- [x] Task queue integration (unistax.tasks + Celery)
-- [x] Security integration (JWT, rate limiting, secrets)
+- [ ] Task queue integration (unistax.tasks + Celery): scaffold only, the worker task is a placeholder (the API schedules tasks in-process)
+- [x] Security integration (JWT, rate limiting) in the REST API; secrets via `unistax.secrets`
 - [x] Data Scientist persona
 - [x] Data Steward persona
 - [x] Orchestrator for multi-agent workflows
@@ -992,6 +1087,15 @@ class IntelligentAgent(RLAgent, HTNAgent, SwarmAgent, Agent):
 - [x] Knowledge graph integration
 - [x] HTN (Hierarchical Task Network) planning
 - [x] Swarm intelligence algorithms (ACO, PSO)
+
+### API and Production Hardening (Completed ✅)
+- [x] REST + WebSocket API with JWT auth, roles, rate limiting, request hardening
+- [x] Database persistence (SQLite/PostgreSQL) for agents, teams, tasks, workflows, knowledge graph
+- [x] Graceful shutdown, restart recovery, health probes, Prometheus metrics
+- [x] Docker image + compose, CI job (SQLite + PostgreSQL)
+- [ ] Schema migrations (Alembic)
+- [ ] Resume/retry of interrupted work
+- [ ] Real persona implementations (current handlers are simulations)
 
 ### Phase 4: Scale (Future 🔮)
 - [ ] Redis-based distributed messaging
@@ -1003,7 +1107,8 @@ class IntelligentAgent(RLAgent, HTNAgent, SwarmAgent, Agent):
 
 See `python/examples/` for complete working examples:
 
-- `agent_collaboration_demo.py` - Basic agent collaboration
+- `agent_collaboration_demo.py` - Basic agent collaboration (in-process)
+- See "Running the API" above for HTTP usage
 - More examples coming soon!
 
 ## Contributing

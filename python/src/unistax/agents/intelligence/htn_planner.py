@@ -14,9 +14,10 @@ HTN planning enables agents to:
 - Adapt plans based on world state
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
 from unistax.logging import get_logger
 
@@ -101,7 +102,7 @@ class HTNOperator:
     preconditions: dict[str, Any] = field(default_factory=dict)
     effects: dict[str, Any] = field(default_factory=dict)
     cost: float = 1.0
-    executor: Optional[Callable] = None  # Function to execute this operator
+    executor: Callable | None = None  # Function to execute this operator
 
     def is_applicable(self, state: dict[str, Any]) -> bool:
         """Check if operator is applicable in current state.
@@ -149,7 +150,7 @@ class HTNPlan:
         self.operators.append(operator)
         self.total_cost += operator.cost
 
-    def get_next_operator(self) -> Optional[HTNOperator]:
+    def get_next_operator(self) -> HTNOperator | None:
         """Get next operator to execute.
 
         Returns:
@@ -270,7 +271,7 @@ class HTNPlanner:
         goal_task: HTNTask,
         initial_state: dict[str, Any],
         max_depth: int = 10,
-    ) -> Optional[HTNPlan]:
+    ) -> HTNPlan | None:
         """Generate plan to achieve goal task.
 
         Uses depth-first HTN planning algorithm.
@@ -400,7 +401,7 @@ class HTNPlanner:
         self,
         plan: HTNPlan,
         initial_state: dict[str, Any],
-        executor: Optional[Callable] = None,
+        executor: Callable | None = None,
     ) -> dict[str, Any]:
         """Execute HTN plan.
 
@@ -424,13 +425,13 @@ class HTNPlanner:
             if not operator:
                 break
 
-            logger.debug(f"Executing operator {executed + 1}/{len(plan.operators)}: {operator.name}")
+            logger.debug(
+                f"Executing operator {executed + 1}/{len(plan.operators)}: {operator.name}"
+            )
 
             # Check preconditions
             if not operator.is_applicable(state):
-                logger.error(
-                    f"Operator {operator.name} not applicable in state: {state}"
-                )
+                logger.error(f"Operator {operator.name} not applicable in state: {state}")
                 plan.status = PlanStatus.FAILED
                 break
 
@@ -462,12 +463,8 @@ class HTNPlanner:
         Returns:
             Statistics dictionary
         """
-        primitive_tasks = sum(
-            1 for t in self.tasks.values() if t.task_type == TaskType.PRIMITIVE
-        )
-        compound_tasks = sum(
-            1 for t in self.tasks.values() if t.task_type == TaskType.COMPOUND
-        )
+        primitive_tasks = sum(1 for t in self.tasks.values() if t.task_type == TaskType.PRIMITIVE)
+        compound_tasks = sum(1 for t in self.tasks.values() if t.task_type == TaskType.COMPOUND)
 
         return {
             "total_tasks": len(self.tasks),
@@ -511,8 +508,9 @@ class HTNAgent:
         ...             return result
     """
 
-    def __init__(self):
-        """Initialize HTN planning for agent."""
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize HTN planning for agent (cooperative with other mixins)."""
+        super().__init__(*args, **kwargs)
         self.htn_planner = HTNPlanner()
         logger.info("HTN planning enabled for agent")
 

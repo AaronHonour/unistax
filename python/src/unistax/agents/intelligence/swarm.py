@@ -14,8 +14,9 @@ Swarm algorithms enable agents to:
 """
 
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import numpy as np
 
@@ -139,13 +140,11 @@ class AntColonyOptimizer:
         self.nodes: set[str] = set()
         self.ants: list[ACOAnt] = []
 
-        self.best_path: Optional[list[str]] = None
+        self.best_path: list[str] | None = None
         self.best_cost: float = float("inf")
         self.iteration_count: int = 0
 
-        logger.info(
-            f"Initialized ACO: {n_ants} ants, α={alpha}, β={beta}, ρ={evaporation_rate}"
-        )
+        logger.info(f"Initialized ACO: {n_ants} ants, α={alpha}, β={beta}, ρ={evaporation_rate}")
 
     def add_edge(
         self,
@@ -199,12 +198,12 @@ class AntColonyOptimizer:
             List of neighbor nodes
         """
         neighbors = []
-        for (source, target) in self.edges:
+        for source, target in self.edges:
             if source == node:
                 neighbors.append(target)
         return neighbors
 
-    def _select_next_node(self, ant: ACOAnt, goal: Optional[str] = None) -> Optional[str]:
+    def _select_next_node(self, ant: ACOAnt, goal: str | None = None) -> str | None:
         """Select next node for ant using pheromone and heuristic.
 
         Uses probability: p = (pheromone^α * heuristic^β) / Σ(...)
@@ -223,10 +222,6 @@ class AntColonyOptimizer:
 
         if not neighbors:
             return None
-
-        # If goal is directly reachable, go there
-        if goal and goal in neighbors:
-            return goal
 
         # Calculate probabilities
         probabilities = []
@@ -265,7 +260,9 @@ class AntColonyOptimizer:
             return
 
         # Amount to deposit (inversely proportional to path cost)
-        deposit = self.pheromone_deposit / ant.path_cost if ant.path_cost > 0 else self.pheromone_deposit
+        deposit = (
+            self.pheromone_deposit / ant.path_cost if ant.path_cost > 0 else self.pheromone_deposit
+        )
 
         # Deposit on each edge in path
         for i in range(len(ant.path) - 1):
@@ -281,7 +278,7 @@ class AntColonyOptimizer:
         goal: str,
         n_iterations: int = 100,
         max_steps: int = 100,
-    ) -> tuple[Optional[list[str]], float]:
+    ) -> tuple[list[str] | None, float]:
         """Run ACO optimization.
 
         Args:
@@ -309,7 +306,7 @@ class AntColonyOptimizer:
 
             # Move ants
             for ant in self.ants:
-                for step in range(max_steps):
+                for _ in range(max_steps):
                     next_node = self._select_next_node(ant, goal)
 
                     if not next_node:
@@ -406,7 +403,7 @@ class ParticleSwarmOptimizer:
         w: float = 0.7,
         c1: float = 1.5,
         c2: float = 1.5,
-        v_max: Optional[float] = None,
+        v_max: float | None = None,
     ):
         """Initialize PSO.
 
@@ -432,7 +429,7 @@ class ParticleSwarmOptimizer:
         self.v_max = v_max
 
         self.particles: list[Particle] = []
-        self.global_best_position: Optional[np.ndarray] = None
+        self.global_best_position: np.ndarray | None = None
         self.global_best_score: float = float("inf") if minimize else float("-inf")
         self.iteration_count: int = 0
 
@@ -440,8 +437,7 @@ class ParticleSwarmOptimizer:
         self._initialize_particles()
 
         logger.info(
-            f"Initialized PSO: {n_particles} particles, {dimensions}D, "
-            f"w={w}, c1={c1}, c2={c2}"
+            f"Initialized PSO: {n_particles} particles, {dimensions}D, " f"w={w}, c1={c1}, c2={c2}"
         )
 
     def _initialize_particles(self):
@@ -622,10 +618,11 @@ class SwarmAgent:
         ...         return best_params
     """
 
-    def __init__(self):
-        """Initialize swarm intelligence for agent."""
-        self.aco: Optional[AntColonyOptimizer] = None
-        self.pso: Optional[ParticleSwarmOptimizer] = None
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize swarm intelligence for agent (cooperative with other mixins)."""
+        super().__init__(*args, **kwargs)
+        self.aco: AntColonyOptimizer | None = None
+        self.pso: ParticleSwarmOptimizer | None = None
         logger.info("Swarm intelligence enabled for agent")
 
     def setup_aco(

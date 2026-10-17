@@ -8,9 +8,9 @@ Specialized agent for data science and machine learning tasks including:
 - Statistical analysis and hypothesis testing
 """
 
-from typing import Any, Optional
+from typing import Any, ClassVar
 
-from unistax.agents.base import Agent, AgentState, Skill, Task, TaskStatus
+from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
@@ -51,13 +51,25 @@ class DataScientistAgent(Agent):
         >>> registry.register(scientist)
     """
 
+    TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "train_model",
+            "evaluate_model",
+            "engineer_features",
+            "run_experiment",
+            "deploy_model",
+            "tune_hyperparameters",
+            "analyze_model",
+        }
+    )
+
     def __init__(
         self,
         agent_id: str,
-        event_bus: Optional[EventBus] = None,
-        metrics_manager: Optional[MetricsManager] = None,
-        skills: Optional[list[Skill]] = None,
-        team_id: Optional[str] = None,
+        event_bus: EventBus | None = None,
+        metrics_manager: MetricsManager | None = None,
+        skills: list[Skill] | None = None,
+        team_id: str | None = None,
         **kwargs,
     ):
         """Initialize Data Scientist agent.
@@ -100,7 +112,7 @@ class DataScientistAgent(Agent):
 
         logger.info(f"Data Scientist {agent_id} initialized")
 
-    async def decide(self) -> Optional[str]:
+    async def decide(self) -> str | None:
         """Decide what action to take next.
 
         Decision priority:
@@ -267,7 +279,6 @@ class DataScientistAgent(Agent):
             Feature engineering result
         """
         dataset = context.get("dataset", "")
-        target_variable = context.get("target", "")
 
         logger.info(f"{self.agent_id} engineering features for: {dataset}")
 
@@ -467,9 +478,7 @@ class DataScientistAgent(Agent):
         # 4. Create alerts for issues
         # 5. Trigger retraining if needed
 
-        logger.debug(
-            f"{self.agent_id} monitored {len(self.models_trained)} models"
-        )
+        logger.debug(f"{self.agent_id} monitored {len(self.models_trained)} models")
 
     def add_model(self, model_name: str):
         """Add a model to monitor.

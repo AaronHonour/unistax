@@ -7,9 +7,9 @@ Provides:
 - Result tracking and callbacks
 """
 
-from typing import Any, Optional
+from typing import Any
 
-from unistax.agents.base import Agent, Task, TaskStatus
+from unistax.agents.base import Task, TaskStatus
 from unistax.agents.registry import AgentRegistry
 from unistax.logging import get_logger
 from unistax.tasks import CeleryManager, task
@@ -42,7 +42,7 @@ class AgentTaskQueue:
     def __init__(
         self,
         registry: AgentRegistry,
-        celery_manager: Optional[CeleryManager] = None,
+        celery_manager: CeleryManager | None = None,
     ):
         """Initialize agent task queue.
 
@@ -64,7 +64,7 @@ class AgentTaskQueue:
         agent_id: str,
         task: Task,
         priority: int = 5,
-        countdown: Optional[int] = None,
+        countdown: int | None = None,
     ) -> str:
         """Submit a task to the queue for agent execution.
 
@@ -185,7 +185,7 @@ class AgentTaskQueue:
         logger.info(f"Cancelled task {task_id}")
         return True
 
-    def get_pending_tasks(self, agent_id: Optional[str] = None) -> list[tuple[str, Task]]:
+    def get_pending_tasks(self, agent_id: str | None = None) -> list[tuple[str, Task]]:
         """Get all pending tasks, optionally filtered by agent.
 
         Args:
@@ -203,9 +203,7 @@ class AgentTaskQueue:
         """
         if agent_id:
             return [
-                (tid, task)
-                for tid, (aid, task) in self.pending_tasks.items()
-                if aid == agent_id
+                (tid, task) for tid, (aid, task) in self.pending_tasks.items() if aid == agent_id
             ]
         return list(self.pending_tasks.values())
 
@@ -255,8 +253,6 @@ def execute_agent_task(
     Note:
         This function is executed by Celery workers, not directly called.
     """
-    from unistax.agents.base import Task
-
     logger.info(f"Executing task {task_id} for agent {agent_id}")
 
     # This would need access to the registry to get the agent
@@ -267,12 +263,6 @@ def execute_agent_task(
 
     # For now, this is a placeholder that shows the pattern
     try:
-        task = Task(
-            id=task_id,
-            type=task_type,
-            context=task_context,
-        )
-
         # In production, would execute: await agent.execute_task(task)
         # For now, return success
         return {
@@ -323,7 +313,7 @@ class AgentTaskScheduler:
         agent_id: str,
         task: Task,
         schedule: str,
-        name: Optional[str] = None,
+        name: str | None = None,
     ) -> str:
         """Schedule a recurring task.
 
@@ -378,7 +368,7 @@ class AgentTaskScheduler:
         logger.warning(f"Schedule {schedule_id} not found")
         return False
 
-    def get_schedules(self, agent_id: Optional[str] = None) -> dict[str, dict[str, Any]]:
+    def get_schedules(self, agent_id: str | None = None) -> dict[str, dict[str, Any]]:
         """Get all scheduled tasks, optionally filtered by agent.
 
         Args:

@@ -22,11 +22,14 @@ class TestRateLimiter:
         limiter = RateLimiter(limit=5, window=60)
 
         # First 5 requests should succeed
-        for i in range(5):
-            assert limiter.is_allowed(f"user:{i}") is True
+        for _ in range(5):
+            assert limiter.is_allowed("user:0") is True
 
-        # 6th request for same key should fail
+        # 6th request for the same key should fail
         assert limiter.is_allowed("user:0") is False
+
+        # Other keys are tracked independently
+        assert limiter.is_allowed("user:1") is True
 
     def test_rate_limit_exceeded_exception(self):
         """Test rate limit exceeded exception."""

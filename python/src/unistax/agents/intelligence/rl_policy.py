@@ -11,11 +11,11 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
-from unistax.agents.base import Agent, Task, TaskStatus
+from unistax.agents.base import Task, TaskStatus
 from unistax.logging import get_logger
 
 logger = get_logger(__name__)
@@ -175,15 +175,11 @@ class AgentRLPolicy:
             return action
 
         # Exploitation: best known action
-        q_values = {
-            action: self.get_q_value(state, action)
-            for action in available_actions
-        }
+        q_values = {action: self.get_q_value(state, action) for action in available_actions}
 
         best_action = max(q_values.items(), key=lambda x: x[1])[0]
         logger.debug(
-            f"Agent {self.agent_id} exploiting: {best_action} "
-            f"(Q={q_values[best_action]:.3f})"
+            f"Agent {self.agent_id} exploiting: {best_action} " f"(Q={q_values[best_action]:.3f})"
         )
 
         return best_action
@@ -221,8 +217,7 @@ class AgentRLPolicy:
         self.avg_reward = (1 - alpha) * self.avg_reward + alpha * reward
 
         logger.debug(
-            f"Agent {self.agent_id} recorded experience: "
-            f"action={action}, reward={reward:.2f}"
+            f"Agent {self.agent_id} recorded experience: " f"action={action}, reward={reward:.2f}"
         )
 
     def learn_from_experience(self, experience: Experience):
@@ -335,7 +330,7 @@ class AgentRLPolicy:
         Args:
             filepath: Path to load from
         """
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             policy_data = json.load(f)
 
         self.q_table = policy_data["q_table"]
@@ -361,12 +356,12 @@ class RLAgent:
         super().__init__(*args, **kwargs)
 
         # RL policy
-        self.rl_policy: Optional[AgentRLPolicy] = None
+        self.rl_policy: AgentRLPolicy | None = None
         self.rl_enabled = False
 
         # Track current episode
-        self.current_state: Optional[dict[str, Any]] = None
-        self.last_action: Optional[str] = None
+        self.current_state: dict[str, Any] | None = None
+        self.last_action: str | None = None
 
     def enable_rl_learning(self, **rl_kwargs):
         """Enable reinforcement learning.
@@ -434,7 +429,7 @@ class RLAgent:
 
         return 0.0
 
-    async def rl_decide(self, available_actions: list[str]) -> Optional[str]:
+    async def rl_decide(self, available_actions: list[str]) -> str | None:
         """Make decision using RL policy.
 
         Args:

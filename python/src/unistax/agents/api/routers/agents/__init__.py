@@ -1,4 +1,4 @@
-"""Agent routers."""
+"""Agent API routers."""
 
 from unistax.agents.api.routers.agents.discovery import router as discovery_router
 from unistax.agents.api.routers.agents.knowledge import router as knowledge_router
@@ -10,12 +10,12 @@ from unistax.agents.api.routers.agents.websocket import router as websocket_rout
 from unistax.agents.api.routers.agents.workflows import router as workflows_router
 
 __all__ = [
+    "discovery_router",
+    "knowledge_router",
     "management_router",
+    "metrics_router",
     "tasks_router",
     "teams_router",
-    "discovery_router",
-    "workflows_router",
-    "knowledge_router",
-    "metrics_router",
     "websocket_router",
+    "workflows_router",
 ]

@@ -1,159 +1,101 @@
-"""Agent discovery and search endpoints."""
+"""Agent discovery endpoints."""
 
-from typing import Annotated
+from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
-from unistax.agents import AgentRegistry, Task
-from unistax.agents.api.dependencies import get_registry
-from unistax.agents.api.schemas import AgentListResponse
-from unistax.agents.api.routers.agents.management import _agent_to_response
+from unistax.agents.api.auth import require_viewer
+from unistax.agents.api.deps import Runtime
+from unistax.agents.api.presenters import agent_response
+from unistax.agents.api.schemas import AgentResponse
+from unistax.agents.api.schemas.common import SkillsMixin, TypeStr
+from unistax.agents.api.services.agents import resolve_persona
+from unistax.agents.api.services.assignment import rank_agents
+from unistax.agents.base import Task
 from unistax.api import APIResponse
-from unistax.logging import get_logger
 
-router = APIRouter(prefix="/discovery", tags=["Agent Discovery"])
-logger = get_logger(__name__)
+router = APIRouter(
+    prefix="/discovery", tags=["Agent Discovery"], dependencies=[Depends(require_viewer)]
+)
+
+
+class TaskMatchRequest(SkillsMixin):
+    task_type: TypeStr
+    required_skills: dict[str, float] | None = None
+
+
+class AgentMatch(BaseModel):
+    agent_id: str
+    persona: str
+    confidence: float
+    queued_tasks: int
 
 
 @router.get(
     "/by-persona/{persona}",
-    response_model=APIResponse[AgentListResponse],
+    response_model=APIResponse[list[AgentResponse]],
     summary="Find agents by persona",
-    description="Discover agents with a specific persona",
 )
-async def find_by_persona(
-    persona: str,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[AgentListResponse]:
-    """Find agents by persona."""
-    logger.debug(f"Finding agents by persona: {persona}")
-
-    agents = registry.find_by_persona(persona)
-
+async def by_persona(persona: str, runtime: Runtime) -> APIResponse[list[AgentResponse]]:
+    agents = runtime.registry.find_by_persona(resolve_persona(persona) or persona)
     return APIResponse(
-        success=True,
-        data=AgentListResponse(
-            agents=[_agent_to_response(a) for a in agents],
-            total=len(agents),
-            page=1,
-            page_size=len(agents),
-        ),
+        data=[agent_response(runtime, a) for a in sorted(agents, key=lambda a: a.agent_id)]
     )
 
 
 @router.get(
-    "/by-skill",
-    response_model=APIResponse[AgentListResponse],
-    summary="Find agents by skill",
-    description="Discover agents with a specific skill and minimum proficiency",
+    "/by-skill", response_model=APIResponse[list[AgentResponse]], summary="Find agents by skill"
 )
-async def find_by_skill(
-    skill: str = Query(..., description="Skill name"),
-    min_proficiency: float = Query(0.0, ge=0.0, le=1.0, description="Minimum proficiency"),
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[AgentListResponse]:
-    """Find agents by skill."""
-    logger.debug(f"Finding agents by skill: {skill} (min={min_proficiency})")
-
-    agents = registry.find_by_skill(skill, min_proficiency=min_proficiency)
-
+async def by_skill(
+    runtime: Runtime,
+    skill: str = Query(..., min_length=1, max_length=64),
+    min_proficiency: float = Query(0.0, ge=0.0, le=1.0),
+) -> APIResponse[list[AgentResponse]]:
+    agents = runtime.registry.find_by_skill(skill, min_proficiency=min_proficiency)
     return APIResponse(
-        success=True,
-        data=AgentListResponse(
-            agents=[_agent_to_response(a) for a in agents],
-            total=len(agents),
-            page=1,
-            page_size=len(agents),
-        ),
+        data=[agent_response(runtime, a) for a in sorted(agents, key=lambda a: a.agent_id)]
     )
 
 
 @router.get(
     "/by-team/{team_id}",
-    response_model=APIResponse[AgentListResponse],
+    response_model=APIResponse[list[AgentResponse]],
     summary="Find agents by team",
-    description="Discover agents belonging to a specific team",
 )
-async def find_by_team(
-    team_id: str,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[AgentListResponse]:
-    """Find agents by team."""
-    logger.debug(f"Finding agents by team: {team_id}")
-
-    agents = registry.find_by_team(team_id)
-
+async def by_team(team_id: str, runtime: Runtime) -> APIResponse[list[AgentResponse]]:
+    agents = runtime.registry.find_by_team(team_id)
     return APIResponse(
-        success=True,
-        data=AgentListResponse(
-            agents=[_agent_to_response(a) for a in agents],
-            total=len(agents),
-            page=1,
-            page_size=len(agents),
-        ),
+        data=[agent_response(runtime, a) for a in sorted(agents, key=lambda a: a.agent_id)]
     )
 
 
 @router.post(
     "/for-task",
-    response_model=APIResponse[AgentListResponse],
-    summary="Find agents for task",
-    description="Find suitable agents for a given task based on required skills",
+    response_model=APIResponse[list[AgentMatch]],
+    summary="Rank agents able to run a task",
+    description="Same matching the scheduler uses when a task is submitted without an agent_id.",
 )
-async def find_for_task(
-    task_type: str = Query(..., description="Task type"),
-    required_skills: dict[str, float] | None = Query(None, description="Required skills"),
-    priority: int = Query(5, ge=1, le=10, description="Task priority"),
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[AgentListResponse]:
-    """Find agents suitable for a task."""
-    logger.debug(f"Finding agents for task: type={task_type}")
-
-    # Create task
-    task = Task(
-        id="discovery",
-        type=task_type,
-        priority=priority,
-        required_skills=required_skills or {},
-    )
-
-    # Find suitable agents
-    agents_with_confidence = registry.find_agents_for_task(task)
-
-    # Sort by confidence (highest first)
-    agents_with_confidence.sort(key=lambda x: x[1], reverse=True)
-
-    agents = [a for a, conf in agents_with_confidence]
-
+async def for_task(body: TaskMatchRequest, runtime: Runtime) -> APIResponse[list[AgentMatch]]:
+    task = Task(type=body.task_type, required_skills=body.required_skills or {})
+    ranked = rank_agents(runtime.registry, task, runtime.executor.load)
     return APIResponse(
-        success=True,
-        data=AgentListResponse(
-            agents=[_agent_to_response(a) for a in agents],
-            total=len(agents),
-            page=1,
-            page_size=len(agents),
-        ),
-        meta={
-            "confidence_scores": {
-                agents[i].agent_id: agents_with_confidence[i][1]
-                for i in range(len(agents))
-            }
-        },
+        data=[
+            AgentMatch(
+                agent_id=c.agent.agent_id,
+                persona=c.agent.persona,
+                confidence=round(c.confidence, 4),
+                queued_tasks=c.load,
+            )
+            for c in ranked
+        ]
     )
 
 
 @router.get(
-    "/statistics",
-    response_model=APIResponse[dict],
-    summary="Get discovery statistics",
-    description="Get statistics about registered agents, personas, skills, and teams",
+    "/statistics", response_model=APIResponse[dict[str, Any]], summary="Registry statistics"
 )
-async def get_statistics(
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[dict]:
-    """Get registry statistics."""
-    logger.debug("Getting discovery statistics")
-
-    stats = registry.get_statistics()
-
-    return APIResponse(success=True, data=stats)
+async def statistics(runtime: Runtime) -> APIResponse[dict[str, Any]]:
+    return APIResponse(data=runtime.registry.get_registry_stats())

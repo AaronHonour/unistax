@@ -1,14 +1,24 @@
-"""Agent API application factory.
+r"""Agent API application factory.
 
-Creates a FastAPI application with all agent endpoints.
+Run with::
+
+    UNISTAX_AGENT_API_JWT_SECRET=<32+ chars> \\
+    uvicorn --factory unistax.agents.api.app:create_agent_api --host 0.0.0.0 --port 8000
+
+See ``unistax.agents.api.settings`` for all configuration options.
 """
 
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from unistax.agents.api import dependencies
+from unistax.agents.api.limits import rate_limit
+from unistax.agents.api.middleware import RequestHardeningMiddleware
 from unistax.agents.api.routers.agents import (
     discovery_router,
     knowledge_router,
@@ -19,166 +29,95 @@ from unistax.agents.api.routers.agents import (
     websocket_router,
     workflows_router,
 )
-from unistax.events import EventBus
+from unistax.agents.api.runtime import AgentRuntime
+from unistax.agents.api.settings import AgentAPISettings
 from unistax.logging import get_logger
-from unistax.metrics import MetricsManager
 
 logger = get_logger(__name__)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator:
-    """Application lifespan manager.
-
-    Handles startup and shutdown of the agent system.
-
-    Args:
-        app: FastAPI application
-
-    Yields:
-        None
-    """
-    # Startup
-    logger.info("Starting agent API")
-
-    # Initialize agent system
-    event_bus = EventBus()
-    metrics_manager = MetricsManager()
-
-    registry = dependencies.initialize_agent_system(
-        event_bus=event_bus,
-        metrics_manager=metrics_manager,
-    )
-
-    logger.info(
-        f"Agent system initialized: {len(registry.agents)} agents, "
-        f"{len(registry.teams)} teams"
-    )
-
-    yield
-
-    # Shutdown
-    logger.info("Shutting down agent API")
-    dependencies.shutdown_agent_system()
-    logger.info("Agent API shutdown complete")
+API_VERSION = "1.0.0"
 
 
 def create_agent_api(
-    title: str = "Agent API",
-    version: str = "1.0.0",
-    description: str | None = None,
-    docs_url: str = "/docs",
-    redoc_url: str = "/redoc",
-    openapi_url: str = "/openapi.json",
-    root_path: str = "",
+    settings: AgentAPISettings | None = None, *, runtime: AgentRuntime | None = None
 ) -> FastAPI:
-    """Create Agent API application.
+    """Build the agent API.
 
     Args:
-        title: API title
-        version: API version
-        description: API description
-        docs_url: Swagger UI docs URL
-        redoc_url: ReDoc docs URL
-        openapi_url: OpenAPI schema URL
-        root_path: Root path for API (for reverse proxy)
+        settings: Configuration; read from the environment when omitted.
+        runtime: Pre-built runtime (mainly for tests).
 
-    Returns:
-        FastAPI application
-
-    Example:
-        >>> app = create_agent_api()
-        >>> # Run with: uvicorn module:app --host 0.0.0.0 --port 8000
+    Raises:
+        ValueError: If the configuration is unsafe (e.g. auth enabled without a key).
     """
-    if description is None:
-        description = """
-        # Agent Framework API
+    if runtime is None:
+        runtime = AgentRuntime(settings or AgentAPISettings.from_env())
+    settings = runtime.settings
 
-        REST API for managing and orchestrating autonomous agents.
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
 
-        ## Features
-
-        - **Agent Management**: Create, update, delete, and monitor agents
-        - **Task Management**: Submit tasks, monitor execution, and track results
-        - **Team Management**: Organize agents into hierarchical teams
-        - **Discovery**: Find agents by persona, skills, or team
-        - **Workflows**: Orchestrate multi-agent workflows with dependencies
-        - **Knowledge Graph**: Share knowledge and best practices across agents
-        - **Metrics**: Monitor agent and system performance
-        - **WebSocket**: Real-time updates via WebSocket connections
-
-        ## Agent Personas
-
-        - **Engineer**: Data engineering, ETL, pipeline development
-        - **Analyst**: Data analysis, reporting, visualization
-        - **Scientist**: ML model training, experimentation, deployment
-        - **Steward**: Data governance, compliance, metadata management
-
-        ## Quick Start
-
-        1. Create an agent: `POST /agents`
-        2. Submit a task: `POST /tasks`
-        3. Monitor progress: `GET /tasks/{task_id}`
-        4. View metrics: `GET /metrics/system`
-        """
-
+    docs = settings.docs_enabled
     app = FastAPI(
-        title=title,
-        version=version,
-        description=description,
-        docs_url=docs_url,
-        redoc_url=redoc_url,
-        openapi_url=openapi_url,
-        root_path=root_path,
+        title="Agent Framework API",
+        version=API_VERSION,
+        description="Manage and orchestrate autonomous data-platform agents.",
         lifespan=lifespan,
+        docs_url=f"{settings.api_prefix}/docs" if docs else None,
+        redoc_url=f"{settings.api_prefix}/redoc" if docs else None,
+        openapi_url=f"{settings.api_prefix}/openapi.json" if docs else None,
     )
+    app.state.runtime = runtime
 
-    # Include routers
-    app.include_router(management_router)
-    app.include_router(tasks_router)
-    app.include_router(teams_router)
-    app.include_router(discovery_router)
-    app.include_router(workflows_router)
-    app.include_router(knowledge_router)
-    app.include_router(metrics_router)
-    app.include_router(websocket_router)
+    # The last middleware added is the outermost.
+    app.add_middleware(RequestHardeningMiddleware, max_body_bytes=settings.max_request_bytes)
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_origins),
+            allow_credentials=False,  # bearer tokens, not cookies
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+        )
 
-    # Root endpoint
-    @app.get("/", tags=["Root"])
-    async def root():
-        """API root endpoint."""
-        return {
-            "message": "Agent Framework API",
-            "version": version,
-            "docs": docs_url,
-            "endpoints": {
-                "agents": "/agents",
-                "tasks": "/tasks",
-                "teams": "/teams",
-                "discovery": "/discovery",
-                "workflows": "/workflows",
-                "knowledge": "/knowledge",
-                "metrics": "/metrics",
-                "websocket": "/ws",
-            },
-        }
+    api = APIRouter(prefix=settings.api_prefix, dependencies=[Depends(rate_limit)])
+    for router in (
+        management_router,
+        tasks_router,
+        teams_router,
+        discovery_router,
+        workflows_router,
+        knowledge_router,
+        metrics_router,
+    ):
+        api.include_router(router)
+    app.include_router(api)
+    app.include_router(websocket_router, prefix=settings.api_prefix)
 
-    logger.info(f"Agent API created: {title} v{version}")
+    @app.get("/health/live", tags=["Health"], summary="Liveness probe")
+    async def live() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/health/ready", tags=["Health"], summary="Readiness probe")
+    async def ready(response: Response) -> dict[str, object]:
+        db_ok = await runtime.db.ping()
+        is_ready = runtime.ready and db_ok
+        if not is_ready:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "ready" if is_ready else "unavailable", "database": db_ok}
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        request_id = request.scope.get("state", {}).get("request_id")
+        logger.error("Unhandled error on %s %s", request.method, request.url.path, exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Internal server error", "request_id": request_id},
+        )
 
     return app
-
-
-# Default application instance
-app = create_agent_api()
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "unistax.agents.api.app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info",
-    )

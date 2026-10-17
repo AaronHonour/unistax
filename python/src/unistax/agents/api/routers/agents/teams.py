@@ -1,128 +1,86 @@
 """Team management endpoints."""
 
-from typing import Annotated
+from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Any
 
-from unistax.agents import AgentRegistry, Team, TeamType
-from unistax.agents.api.dependencies import get_registry
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+
+from unistax.agents.api.auth import Principal, require_admin, require_viewer
+from unistax.agents.api.deps import Paging, Runtime
+from unistax.agents.api.presenters import team_response
 from unistax.agents.api.schemas import (
     CreateTeamRequest,
-    TeamListResponse,
     TeamResponse,
     UpdateTeamRequest,
+    paginate,
 )
-from unistax.api import APIResponse
-from unistax.logging import get_logger
+from unistax.agents.team import Team, TeamType
+from unistax.api import APIResponse, PaginatedResponse
 
 router = APIRouter(prefix="/teams", tags=["Team Management"])
-logger = get_logger(__name__)
 
 
-def _team_to_response(team: Team, registry: AgentRegistry) -> TeamResponse:
-    """Convert team to response model.
+def _get_team(runtime: Runtime, team_id: str) -> Team:
+    team = runtime.registry.get_team(team_id)
+    if team is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Team '{team_id}' not found")
+    return team
 
-    Args:
-        team: Team instance
-        registry: Agent registry
 
-    Returns:
-        TeamResponse
-    """
-    # Count members
-    members = [a for a in registry.agents.values() if a.team_id == team.id]
-
-    # Find leader
-    leader_id = None
-    for agent in members:
-        if hasattr(agent, "role") and agent.role == "leader":
-            leader_id = agent.agent_id
-            break
-
-    # Get sub-teams
-    hierarchy = registry.team_hierarchy
-    sub_teams = []
-    if hierarchy:
-        for team_id, parent_id in hierarchy.parent_teams.items():
-            if parent_id == team.id:
-                sub_teams.append(team_id)
-
-    return TeamResponse(
-        team_id=team.id,
-        name=team.name,
-        team_type=team.type.value,
-        parent_team_id=None,  # Would need hierarchy lookup
-        description=None,  # Team class doesn't have description
-        member_count=len(members),
-        leader_id=leader_id,
-        sub_teams=sub_teams,
-    )
+def _unprocessable(detail: str) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail)
 
 
 @router.post(
     "",
-    response_model=APIResponse[TeamResponse],
     status_code=status.HTTP_201_CREATED,
+    response_model=APIResponse[TeamResponse],
     summary="Create team",
-    description="Create a new team",
 )
 async def create_team(
-    request: CreateTeamRequest,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
+    body: CreateTeamRequest, runtime: Runtime, _: Principal = Depends(require_admin)
 ) -> APIResponse[TeamResponse]:
-    """Create a new team."""
-    logger.info(f"Creating team: {request.name} (type={request.team_type})")
-
-    # Parse team type
     try:
-        team_type = TeamType[request.team_type.upper()]
-    except KeyError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid team type: {request.team_type}",
-        )
+        team_type = TeamType(body.team_type.lower())
+    except ValueError:
+        raise _unprocessable(
+            f"Unknown team type '{body.team_type}'; use one of {[t.value for t in TeamType]}"
+        ) from None
+    if body.parent_team_id and runtime.registry.get_team(body.parent_team_id) is None:
+        raise _unprocessable(f"Parent team '{body.parent_team_id}' not found")
+    if body.leader_id and runtime.registry.get(body.leader_id) is None:
+        raise _unprocessable(f"Leader agent '{body.leader_id}' not found")
 
-    # Create team
-    team = registry.create_team(
-        name=request.name,
+    team = runtime.registry.create_team(
+        name=body.name,
         team_type=team_type,
+        leader_id=body.leader_id,
+        parent_id=body.parent_team_id,
     )
-
-    # Set parent if provided
-    if request.parent_team_id:
-        hierarchy = registry.team_hierarchy
-        if hierarchy:
-            hierarchy.add_team(team, parent_id=request.parent_team_id)
-
-    logger.info(f"Team {team.id} created successfully")
-
-    return APIResponse(
-        success=True,
-        data=_team_to_response(team, registry),
-        message=f"Team {team.id} created successfully",
-    )
+    try:
+        await runtime.save_team(team)
+    except Exception:
+        runtime.registry.remove_team(team.id)
+        raise
+    return APIResponse(data=team_response(runtime, team), message="Team created")
 
 
 @router.get(
     "",
-    response_model=APIResponse[TeamListResponse],
+    response_model=PaginatedResponse[TeamResponse],
     summary="List teams",
-    description="Get list of all teams",
+    dependencies=[Depends(require_viewer)],
 )
-async def list_teams(
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[TeamListResponse]:
-    """List all teams."""
-    logger.debug("Listing teams")
-
-    teams = list(registry.teams.values())
-
-    return APIResponse(
-        success=True,
-        data=TeamListResponse(
-            teams=[_team_to_response(t, registry) for t in teams],
-            total=len(teams),
-        ),
+async def list_teams(runtime: Runtime, paging: Paging) -> PaginatedResponse[Any]:
+    teams = sorted(runtime.registry.team_hierarchy.teams.values(), key=lambda t: (t.name, t.id))
+    page = teams[paging.offset : paging.offset + paging.page_size]
+    return paginate(
+        TeamResponse,
+        [team_response(runtime, t) for t in page],
+        paging.page,
+        paging.page_size,
+        len(teams),
     )
 
 
@@ -130,120 +88,59 @@ async def list_teams(
     "/{team_id}",
     response_model=APIResponse[TeamResponse],
     summary="Get team",
-    description="Get details of a specific team by ID",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_team(
-    team_id: str,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[TeamResponse]:
-    """Get team by ID."""
-    logger.debug(f"Getting team: {team_id}")
-
-    team = registry.teams.get(team_id)
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {team_id} not found",
-        )
-
-    return APIResponse(success=True, data=_team_to_response(team, registry))
+async def get_team(team_id: str, runtime: Runtime) -> APIResponse[TeamResponse]:
+    return APIResponse(data=team_response(runtime, _get_team(runtime, team_id)))
 
 
 @router.patch(
     "/{team_id}",
     response_model=APIResponse[TeamResponse],
-    summary="Update team",
-    description="Update team details",
+    summary="Rename or move a team",
 )
 async def update_team(
     team_id: str,
-    request: UpdateTeamRequest,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
+    body: UpdateTeamRequest,
+    runtime: Runtime,
+    _: Principal = Depends(require_admin),
 ) -> APIResponse[TeamResponse]:
-    """Update team."""
-    logger.info(f"Updating team: {team_id}")
-
-    team = registry.teams.get(team_id)
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {team_id} not found",
+    _get_team(runtime, team_id)
+    try:
+        team = runtime.registry.update_team(
+            team_id,
+            name=body.name,
+            parent_id=body.parent_team_id,
+            reparent="parent_team_id" in body.model_fields_set,
         )
+    except KeyError:
+        raise _unprocessable(f"Parent team '{body.parent_team_id}' not found") from None
+    except ValueError as exc:
+        raise _unprocessable(str(exc)) from None
 
-    # Update name
-    if request.name is not None:
-        team.name = request.name
-
-    # Update parent
-    if request.parent_team_id is not None:
-        hierarchy = registry.team_hierarchy
-        if hierarchy:
-            hierarchy.add_team(team, parent_id=request.parent_team_id)
-
-    logger.info(f"Team {team_id} updated successfully")
-
-    return APIResponse(
-        success=True,
-        data=_team_to_response(team, registry),
-        message=f"Team {team_id} updated successfully",
-    )
+    await runtime.save_team(team)
+    return APIResponse(data=team_response(runtime, team), message="Team updated")
 
 
-@router.delete(
-    "/{team_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete team",
-    description="Delete a team",
-)
+@router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete team")
 async def delete_team(
-    team_id: str,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> None:
-    """Delete team."""
-    logger.info(f"Deleting team: {team_id}")
-
-    team = registry.teams.get(team_id)
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {team_id} not found",
-        )
-
-    # Check if team has members
-    members = [a for a in registry.agents.values() if a.team_id == team_id]
-    if members:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot delete team with {len(members)} members. Remove members first.",
-        )
-
-    # Remove from registry
-    del registry.teams[team_id]
-
-    logger.info(f"Team {team_id} deleted successfully")
+    team_id: str, runtime: Runtime, _: Principal = Depends(require_admin)
+) -> Response:
+    _get_team(runtime, team_id)
+    try:
+        runtime.registry.remove_team(team_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    await runtime.store.delete_team(team_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
     "/{team_id}/members",
     response_model=APIResponse[list[str]],
-    summary="Get team members",
-    description="Get list of agent IDs in a team",
+    summary="List team member ids",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_team_members(
-    team_id: str,
-    registry: Annotated[AgentRegistry, Depends(get_registry)],
-) -> APIResponse[list[str]]:
-    """Get team members."""
-    logger.debug(f"Getting members for team: {team_id}")
-
-    team = registry.teams.get(team_id)
-    if not team:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Team {team_id} not found",
-        )
-
-    # Get member IDs
-    member_ids = [a.agent_id for a in registry.agents.values() if a.team_id == team_id]
-
-    return APIResponse(success=True, data=member_ids)
+async def team_members(team_id: str, runtime: Runtime) -> APIResponse[list[str]]:
+    team = _get_team(runtime, team_id)
+    return APIResponse(data=sorted(team.all_members(include_leader=True)))

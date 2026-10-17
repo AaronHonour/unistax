@@ -8,9 +8,9 @@ Specialized agent for data engineering tasks including:
 - Infrastructure maintenance
 """
 
-from typing import Any, Optional
+from typing import Any, ClassVar
 
-from unistax.agents.base import Agent, AgentState, Skill, Task, TaskStatus
+from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
@@ -51,13 +51,24 @@ class DataEngineerAgent(Agent):
         >>> registry.register(engineer)
     """
 
+    TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "build_pipeline",
+            "optimize_query",
+            "quality_check",
+            "schema_migration",
+            "monitor_pipeline",
+            "fix_data_issue",
+        }
+    )
+
     def __init__(
         self,
         agent_id: str,
-        event_bus: Optional[EventBus] = None,
-        metrics_manager: Optional[MetricsManager] = None,
-        skills: Optional[list[Skill]] = None,
-        team_id: Optional[str] = None,
+        event_bus: EventBus | None = None,
+        metrics_manager: MetricsManager | None = None,
+        skills: list[Skill] | None = None,
+        team_id: str | None = None,
         **kwargs,
     ):
         """Initialize Data Engineer agent.
@@ -99,7 +110,7 @@ class DataEngineerAgent(Agent):
 
         logger.info(f"Data Engineer {agent_id} initialized")
 
-    async def decide(self) -> Optional[str]:
+    async def decide(self) -> str | None:
         """Decide what action to take next.
 
         Decision priority:
@@ -219,7 +230,6 @@ class DataEngineerAgent(Agent):
         Returns:
             Optimization result
         """
-        query = context.get("query", "")
         table = context.get("table", "")
 
         logger.info(f"{self.agent_id} optimizing query for table: {table}")
@@ -343,8 +353,7 @@ class DataEngineerAgent(Agent):
         affected_records = context.get("affected_records", 0)
 
         logger.info(
-            f"{self.agent_id} fixing data issue: {issue_type} "
-            f"({affected_records} records)"
+            f"{self.agent_id} fixing data issue: {issue_type} " f"({affected_records} records)"
         )
 
         # Simulate issue fixing

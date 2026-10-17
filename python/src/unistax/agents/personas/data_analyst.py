@@ -8,9 +8,9 @@ Specialized agent for data analysis tasks including:
 - Business intelligence
 """
 
-from typing import Any, Optional
+from typing import Any, ClassVar
 
-from unistax.agents.base import Agent, AgentState, Skill, Task, TaskStatus
+from unistax.agents.base import Agent, AgentState, Skill, Task
 from unistax.events import EventBus
 from unistax.logging import get_logger
 from unistax.metrics import MetricsManager
@@ -51,13 +51,25 @@ class DataAnalystAgent(Agent):
         >>> registry.register(analyst)
     """
 
+    TASK_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "analyze_data",
+            "create_dashboard",
+            "generate_report",
+            "execute_query",
+            "identify_trends",
+            "calculate_metrics",
+            "provide_insights",
+        }
+    )
+
     def __init__(
         self,
         agent_id: str,
-        event_bus: Optional[EventBus] = None,
-        metrics_manager: Optional[MetricsManager] = None,
-        skills: Optional[list[Skill]] = None,
-        team_id: Optional[str] = None,
+        event_bus: EventBus | None = None,
+        metrics_manager: MetricsManager | None = None,
+        skills: list[Skill] | None = None,
+        team_id: str | None = None,
         **kwargs,
     ):
         """Initialize Data Analyst agent.
@@ -100,7 +112,7 @@ class DataAnalystAgent(Agent):
 
         logger.info(f"Data Analyst {agent_id} initialized")
 
-    async def decide(self) -> Optional[str]:
+    async def decide(self) -> str | None:
         """Decide what action to take next.
 
         Decision priority:
@@ -298,7 +310,6 @@ class DataAnalystAgent(Agent):
         Returns:
             Query execution result
         """
-        query = context.get("query", "")
         database = context.get("database", "default")
 
         logger.info(f"{self.agent_id} executing query on: {database}")
@@ -319,8 +330,18 @@ class DataAnalystAgent(Agent):
             "execution_time_ms": 245,
             "columns": ["customer_id", "order_date", "total_amount", "status"],
             "sample_data": [
-                {"customer_id": 1001, "order_date": "2024-01-10", "total_amount": 299.99, "status": "completed"},
-                {"customer_id": 1002, "order_date": "2024-01-11", "total_amount": 149.50, "status": "pending"},
+                {
+                    "customer_id": 1001,
+                    "order_date": "2024-01-10",
+                    "total_amount": 299.99,
+                    "status": "completed",
+                },
+                {
+                    "customer_id": 1002,
+                    "order_date": "2024-01-11",
+                    "total_amount": 149.50,
+                    "status": "pending",
+                },
             ],
         }
 
@@ -373,7 +394,6 @@ class DataAnalystAgent(Agent):
         Returns:
             Metrics calculation result
         """
-        metric_types = context.get("metrics", [])
         data_source = context.get("data_source", "")
 
         logger.info(f"{self.agent_id} calculating metrics from: {data_source}")
@@ -395,7 +415,11 @@ class DataAnalystAgent(Agent):
                 "avg_order_value": {"value": 86.21, "change": "+6%", "vs_target": "+3%"},
             },
             "alerts": [
-                {"metric": "conversion_rate", "message": "Below target by 5%", "severity": "warning"}
+                {
+                    "metric": "conversion_rate",
+                    "message": "Below target by 5%",
+                    "severity": "warning",
+                }
             ],
         }
 
@@ -409,7 +433,6 @@ class DataAnalystAgent(Agent):
             Business insights
         """
         topic = context.get("topic", "")
-        data_sources = context.get("data_sources", [])
 
         logger.info(f"{self.agent_id} providing insights on: {topic}")
 
@@ -428,7 +451,10 @@ class DataAnalystAgent(Agent):
             "insights": [
                 {
                     "title": "Customer Retention Opportunity",
-                    "description": "Customers who purchase within first 7 days have 3x higher lifetime value",
+                    "description": (
+                        "Customers who purchase within first 7 days "
+                        "have 3x higher lifetime value"
+                    ),
                     "recommendation": "Implement onboarding campaign for new customers",
                     "priority": "high",
                     "impact": "Potential 15% increase in CLV",
@@ -462,9 +488,7 @@ class DataAnalystAgent(Agent):
         # 3. Identify interesting trends
         # 4. Create tasks for investigation
 
-        logger.debug(
-            f"{self.agent_id} monitored {len(self.dashboards_created)} dashboards"
-        )
+        logger.debug(f"{self.agent_id} monitored {len(self.dashboards_created)} dashboards")
 
     def add_dashboard(self, dashboard_name: str):
         """Add a dashboard to monitor.

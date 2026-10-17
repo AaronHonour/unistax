@@ -1,10 +1,17 @@
 """Knowledge graph endpoints."""
 
-from typing import Annotated
+from __future__ import annotations
+
+from collections.abc import Iterable
+from enum import Enum
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from unistax.agents.api.dependencies import get_knowledge_graph
+from unistax.agents.api.auth import Principal, require_operator, require_viewer
+from unistax.agents.api.db.store import as_utc, to_jsonable
+from unistax.agents.api.deps import Paging, Runtime
+from unistax.agents.api.presenters import edge_response, node_response
 from unistax.agents.api.schemas import (
     AddEdgeRequest,
     AddNodeRequest,
@@ -12,173 +19,117 @@ from unistax.agents.api.schemas import (
     IssueRequest,
     KnowledgeEdgeResponse,
     KnowledgeNodeResponse,
+    paginate,
 )
-from unistax.agents.intelligence import AgentKnowledgeGraph, NodeType, RelationType
-from unistax.api import APIResponse
-from unistax.logging import get_logger
+from unistax.agents.intelligence.knowledge_graph import (
+    KnowledgeEdge,
+    KnowledgeNode,
+    NodeType,
+    RelationType,
+)
+from unistax.api import APIResponse, PaginatedResponse
 
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Graph"])
-logger = get_logger(__name__)
+
+E = TypeVar("E", bound=Enum)
 
 
-def _node_to_response(node) -> KnowledgeNodeResponse:
-    """Convert knowledge node to response model."""
-    return KnowledgeNodeResponse(
-        node_id=node.id,
+def _unprocessable(detail: str) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail)
+
+
+def _parse_enum(enum_cls: type[E], value: str, label: str) -> E:
+    try:
+        return enum_cls(value.lower())
+    except ValueError:
+        raise _unprocessable(
+            f"Unknown {label} '{value}'; use one of {[e.value for e in enum_cls]}"
+        ) from None
+
+
+def _require_nodes(runtime: Runtime, ids: list[str]) -> None:
+    missing = [i for i in ids if i not in runtime.knowledge_graph.nodes]
+    if missing:
+        raise _unprocessable(f"Unknown node(s): {missing}")
+
+
+def _get_node(runtime: Runtime, node_id: str) -> KnowledgeNode:
+    node = runtime.knowledge_graph.get_node(node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Node '{node_id}' not found")
+    return node
+
+
+async def _persist_node(runtime: Runtime, node: KnowledgeNode) -> None:
+    await runtime.store.upsert_node(
+        id=node.id,
         node_type=node.node_type.value,
-        properties=node.properties,
+        properties=to_jsonable(node.properties),
         created_by=node.created_by,
-        created_at=node.created_at,
-        updated_at=node.updated_at,
+        created_at=as_utc(node.created_at),
+        updated_at=as_utc(node.updated_at),
     )
 
 
-def _edge_to_response(edge) -> KnowledgeEdgeResponse:
-    """Convert knowledge edge to response model."""
-    return KnowledgeEdgeResponse(
-        source_id=edge.source_id,
-        target_id=edge.target_id,
-        relation_type=edge.relation_type.value,
-        properties=edge.properties,
-        created_by=edge.created_by,
-        created_at=edge.created_at,
-    )
+async def _persist_edges(runtime: Runtime, edges: Iterable[KnowledgeEdge]) -> None:
+    for edge in edges:
+        await runtime.store.add_edge(
+            source_id=edge.source_id,
+            target_id=edge.target_id,
+            relation_type=edge.relation_type.value,
+            properties=to_jsonable(edge.properties),
+            weight=edge.weight,
+            created_by=edge.created_by,
+            created_at=as_utc(edge.created_at),
+        )
 
 
 @router.post(
     "/nodes",
-    response_model=APIResponse[KnowledgeNodeResponse],
     status_code=status.HTTP_201_CREATED,
-    summary="Add knowledge node",
-    description="Add a new node to the knowledge graph",
+    response_model=APIResponse[KnowledgeNodeResponse],
+    summary="Add or update a node",
 )
 async def add_node(
-    request: AddNodeRequest,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
+    body: AddNodeRequest, runtime: Runtime, principal: Principal = Depends(require_operator)
 ) -> APIResponse[KnowledgeNodeResponse]:
-    """Add knowledge node."""
-    logger.info(f"Adding knowledge node: {request.node_id} (type={request.node_type})")
-
-    try:
-        node_type = NodeType[request.node_type.upper()]
-    except KeyError:
+    node_type = _parse_enum(NodeType, body.node_type, "node type")
+    existing = runtime.knowledge_graph.get_node(body.node_id)
+    if existing and existing.node_type != node_type:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid node type: {request.node_type}",
+            status.HTTP_409_CONFLICT,
+            f"Node '{body.node_id}' already exists with type '{existing.node_type.value}'",
         )
-
-    node = kg.add_node(
-        node_id=request.node_id,
-        node_type=node_type,
-        properties=request.properties,
+    node = runtime.knowledge_graph.add_node(
+        body.node_id, node_type, body.properties, agent_id=principal.subject
     )
-
-    logger.info(f"Knowledge node {request.node_id} added successfully")
-
-    return APIResponse(
-        success=True,
-        data=_node_to_response(node),
-        message=f"Node {request.node_id} added successfully",
-    )
+    await _persist_node(runtime, node)
+    return APIResponse(data=node_response(node), message="Node saved")
 
 
-@router.post(
-    "/edges",
-    response_model=APIResponse[KnowledgeEdgeResponse],
-    status_code=status.HTTP_201_CREATED,
-    summary="Add knowledge edge",
-    description="Add a new edge (relationship) to the knowledge graph",
+@router.get(
+    "/nodes",
+    response_model=PaginatedResponse[KnowledgeNodeResponse],
+    summary="List nodes",
+    dependencies=[Depends(require_viewer)],
 )
-async def add_edge(
-    request: AddEdgeRequest,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[KnowledgeEdgeResponse]:
-    """Add knowledge edge."""
-    logger.info(
-        f"Adding knowledge edge: {request.source_id} -> {request.target_id} ({request.relation_type})"
+async def list_nodes(
+    runtime: Runtime, paging: Paging, node_type: str | None = Query(None)
+) -> PaginatedResponse[Any]:
+    kg = runtime.knowledge_graph
+    nodes = (
+        kg.query_by_type(_parse_enum(NodeType, node_type, "node type"))
+        if node_type
+        else list(kg.nodes.values())
     )
-
-    try:
-        relation_type = RelationType[request.relation_type.upper()]
-    except KeyError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid relation type: {request.relation_type}",
-        )
-
-    edge = kg.add_edge(
-        source_id=request.source_id,
-        target_id=request.target_id,
-        relation_type=relation_type,
-        properties=request.properties,
-    )
-
-    logger.info(f"Knowledge edge added successfully")
-
-    return APIResponse(
-        success=True,
-        data=_edge_to_response(edge),
-        message="Edge added successfully",
-    )
-
-
-@router.post(
-    "/best-practices",
-    response_model=APIResponse[KnowledgeNodeResponse],
-    status_code=status.HTTP_201_CREATED,
-    summary="Add best practice",
-    description="Share a best practice in the knowledge graph",
-)
-async def add_best_practice(
-    request: BestPracticeRequest,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[KnowledgeNodeResponse]:
-    """Add best practice."""
-    logger.info(f"Adding best practice: {request.practice_id}")
-
-    node = kg.add_best_practice(
-        practice_id=request.practice_id,
-        topic=request.topic,
-        description=request.description,
-        related_nodes=request.related_nodes,
-    )
-
-    logger.info(f"Best practice {request.practice_id} added successfully")
-
-    return APIResponse(
-        success=True,
-        data=_node_to_response(node),
-        message=f"Best practice {request.practice_id} added successfully",
-    )
-
-
-@router.post(
-    "/issues",
-    response_model=APIResponse[KnowledgeNodeResponse],
-    status_code=status.HTTP_201_CREATED,
-    summary="Record issue",
-    description="Record an issue in the knowledge graph",
-)
-async def record_issue(
-    request: IssueRequest,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[KnowledgeNodeResponse]:
-    """Record issue."""
-    logger.info(f"Recording issue: {request.issue_id}")
-
-    node = kg.record_issue(
-        issue_id=request.issue_id,
-        description=request.description,
-        severity=request.severity,
-        affected_nodes=request.affected_nodes,
-    )
-
-    logger.info(f"Issue {request.issue_id} recorded successfully")
-
-    return APIResponse(
-        success=True,
-        data=_node_to_response(node),
-        message=f"Issue {request.issue_id} recorded successfully",
+    nodes.sort(key=lambda n: n.id)
+    page = nodes[paging.offset : paging.offset + paging.page_size]
+    return paginate(
+        KnowledgeNodeResponse,
+        [node_response(n) for n in page],
+        paging.page,
+        paging.page_size,
+        len(nodes),
     )
 
 
@@ -186,130 +137,141 @@ async def record_issue(
     "/nodes/{node_id}",
     response_model=APIResponse[KnowledgeNodeResponse],
     summary="Get node",
-    description="Get a knowledge graph node by ID",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_node(
-    node_id: str,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[KnowledgeNodeResponse]:
-    """Get knowledge node."""
-    logger.debug(f"Getting knowledge node: {node_id}")
+async def get_node(node_id: str, runtime: Runtime) -> APIResponse[KnowledgeNodeResponse]:
+    return APIResponse(data=node_response(_get_node(runtime, node_id)))
 
-    node = kg.get_node(node_id)
-    if not node:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Node {node_id} not found",
-        )
 
-    return APIResponse(success=True, data=_node_to_response(node))
+@router.get(
+    "/nodes/{node_id}/edges",
+    response_model=APIResponse[list[KnowledgeEdgeResponse]],
+    summary="Edges touching a node",
+    dependencies=[Depends(require_viewer)],
+)
+async def node_edges(node_id: str, runtime: Runtime) -> APIResponse[list[KnowledgeEdgeResponse]]:
+    _get_node(runtime, node_id)
+    kg = runtime.knowledge_graph
+    edges = [*kg.get_outgoing_edges(node_id), *kg.get_incoming_edges(node_id)]
+    return APIResponse(data=[edge_response(e) for e in edges])
 
 
 @router.get(
     "/nodes/{node_id}/dependencies",
     response_model=APIResponse[list[str]],
-    summary="Get dependencies",
-    description="Get transitive dependencies of a node",
+    summary="Transitive dependencies",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_dependencies(
-    node_id: str,
-    max_depth: int = Query(3, ge=1, le=10, description="Maximum traversal depth"),
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
+async def dependencies(
+    node_id: str, runtime: Runtime, max_depth: int = Query(3, ge=1, le=10)
 ) -> APIResponse[list[str]]:
-    """Get node dependencies."""
-    logger.debug(f"Getting dependencies for node: {node_id}")
-
-    if node_id not in kg.nodes:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Node {node_id} not found",
-        )
-
-    dependencies = kg.get_dependencies(node_id, max_depth=max_depth)
-
-    return APIResponse(success=True, data=dependencies)
+    _get_node(runtime, node_id)
+    return APIResponse(data=sorted(runtime.knowledge_graph.get_dependencies(node_id, max_depth)))
 
 
 @router.get(
     "/nodes/{node_id}/consumers",
     response_model=APIResponse[list[str]],
-    summary="Get consumers",
-    description="Get nodes that consume this node",
+    summary="Nodes consuming this node",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_consumers(
-    node_id: str,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[list[str]]:
-    """Get node consumers."""
-    logger.debug(f"Getting consumers for node: {node_id}")
-
-    if node_id not in kg.nodes:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Node {node_id} not found",
-        )
-
-    consumers = kg.get_consumers(node_id)
-
-    return APIResponse(success=True, data=consumers)
+async def consumers(node_id: str, runtime: Runtime) -> APIResponse[list[str]]:
+    _get_node(runtime, node_id)
+    return APIResponse(data=sorted(runtime.knowledge_graph.get_consumers(node_id)))
 
 
 @router.get(
-    "/nodes/type/{node_type}",
-    response_model=APIResponse[list[KnowledgeNodeResponse]],
-    summary="Query by type",
-    description="Get all nodes of a specific type",
+    "/nodes/{node_id}/producers",
+    response_model=APIResponse[list[str]],
+    summary="Nodes producing this node",
+    dependencies=[Depends(require_viewer)],
 )
-async def query_by_type(
-    node_type: str,
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[list[KnowledgeNodeResponse]]:
-    """Query nodes by type."""
-    logger.debug(f"Querying nodes by type: {node_type}")
+async def producers(node_id: str, runtime: Runtime) -> APIResponse[list[str]]:
+    _get_node(runtime, node_id)
+    return APIResponse(data=sorted(runtime.knowledge_graph.get_producers(node_id)))
 
-    try:
-        node_type_enum = NodeType[node_type.upper()]
-    except KeyError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid node type: {node_type}",
-        )
 
-    nodes = kg.query_by_type(node_type_enum)
+@router.post(
+    "/edges",
+    status_code=status.HTTP_201_CREATED,
+    response_model=APIResponse[KnowledgeEdgeResponse],
+    summary="Add an edge between two existing nodes",
+)
+async def add_edge(
+    body: AddEdgeRequest, runtime: Runtime, principal: Principal = Depends(require_operator)
+) -> APIResponse[KnowledgeEdgeResponse]:
+    relation = _parse_enum(RelationType, body.relation_type, "relation type")
+    _require_nodes(runtime, [body.source_id, body.target_id])
+    edge = runtime.knowledge_graph.add_edge(
+        body.source_id,
+        body.target_id,
+        relation,
+        properties=body.properties,
+        weight=body.weight,
+        agent_id=principal.subject,
+    )
+    await _persist_edges(runtime, [edge])
+    return APIResponse(data=edge_response(edge), message="Edge added")
 
-    return APIResponse(success=True, data=[_node_to_response(n) for n in nodes])
+
+@router.post(
+    "/best-practices",
+    status_code=status.HTTP_201_CREATED,
+    response_model=APIResponse[KnowledgeNodeResponse],
+    summary="Share a best practice",
+)
+async def add_best_practice(
+    body: BestPracticeRequest, runtime: Runtime, principal: Principal = Depends(require_operator)
+) -> APIResponse[KnowledgeNodeResponse]:
+    _require_nodes(runtime, body.related_nodes)
+    kg = runtime.knowledge_graph
+    before = len(kg.edges)
+    node = kg.add_best_practice(
+        body.practice_id, body.topic, body.description, principal.subject, body.related_nodes
+    )
+    await _persist_node(runtime, node)
+    await _persist_edges(runtime, kg.edges[before:])
+    return APIResponse(data=node_response(node), message="Best practice saved")
 
 
 @router.get(
     "/best-practices",
     response_model=APIResponse[list[KnowledgeNodeResponse]],
-    summary="Get best practices",
-    description="Get best practices, optionally filtered by topic",
+    summary="List best practices",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_best_practices(
-    topic: str | None = Query(None, description="Filter by topic"),
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
+async def best_practices(
+    runtime: Runtime, topic: str | None = Query(None)
 ) -> APIResponse[list[KnowledgeNodeResponse]]:
-    """Get best practices."""
-    logger.debug(f"Getting best practices (topic={topic})")
+    practices = runtime.knowledge_graph.get_best_practices(topic=topic)
+    return APIResponse(data=[node_response(p) for p in sorted(practices, key=lambda n: n.id)])
 
-    practices = kg.get_best_practices(topic=topic)
 
-    return APIResponse(success=True, data=[_node_to_response(p) for p in practices])
+@router.post(
+    "/issues",
+    status_code=status.HTTP_201_CREATED,
+    response_model=APIResponse[KnowledgeNodeResponse],
+    summary="Record an issue",
+)
+async def record_issue(
+    body: IssueRequest, runtime: Runtime, principal: Principal = Depends(require_operator)
+) -> APIResponse[KnowledgeNodeResponse]:
+    _require_nodes(runtime, body.affected_nodes)
+    kg = runtime.knowledge_graph
+    before = len(kg.edges)
+    node = kg.record_issue(
+        body.issue_id, body.description, body.severity, body.affected_nodes, principal.subject
+    )
+    await _persist_node(runtime, node)
+    await _persist_edges(runtime, kg.edges[before:])
+    return APIResponse(data=node_response(node), message="Issue recorded")
 
 
 @router.get(
     "/statistics",
-    response_model=APIResponse[dict],
-    summary="Get knowledge graph statistics",
-    description="Get statistics about the knowledge graph",
+    response_model=APIResponse[dict[str, Any]],
+    summary="Graph statistics",
+    dependencies=[Depends(require_viewer)],
 )
-async def get_statistics(
-    kg: Annotated[AgentKnowledgeGraph, Depends(get_knowledge_graph)],
-) -> APIResponse[dict]:
-    """Get knowledge graph statistics."""
-    logger.debug("Getting knowledge graph statistics")
-
-    stats = kg.get_statistics()
-
-    return APIResponse(success=True, data=stats)
+async def statistics(runtime: Runtime) -> APIResponse[dict[str, Any]]:
+    return APIResponse(data=runtime.knowledge_graph.get_graph_statistics())

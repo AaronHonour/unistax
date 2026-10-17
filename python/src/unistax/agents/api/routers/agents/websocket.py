@@ -1,227 +1,193 @@
-"""WebSocket endpoints for real-time updates."""
+"""WebSocket event stream.
+
+Connect to ``/api/v1/ws/events`` (all agents) or ``/api/v1/ws/agents/{agent_id}``.
+
+Authentication: send ``Authorization: Bearer <token>`` in the handshake, or - for
+browsers, which cannot set headers - send ``{"action": "auth", "token": "<token>"}``
+as the first message (within ``ws_auth_timeout`` seconds). Tokens are deliberately
+not accepted in the URL, where they would end up in access logs.
+
+Client messages::
+
+    {"action": "subscribe",   "event_types": ["task_completed"], "agent_id": "eng_1"}
+    {"action": "unsubscribe", "event_types": ["task_completed"]}
+    {"action": "ping"}
+
+Server messages have a ``type`` of ``connected``, ``subscribed``, ``pong``,
+``heartbeat``, ``error`` or ``event`` (the latter carries ``event``, ``timestamp``
+and ``data``). ``agent_message`` events require the ``operator`` role.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from unistax.agents.api.dependencies import get_event_bus
-from unistax.events import EventBus
+from unistax.agents.api.auth import ANONYMOUS, AuthError, Principal, Role
+from unistax.agents.api.runtime import AgentRuntime
+from unistax.agents.api.services.events import KNOWN_EVENT_TYPES, Subscriber
 from unistax.logging import get_logger
 
-router = APIRouter(prefix="/ws", tags=["WebSocket"])
 logger = get_logger(__name__)
 
-# Active WebSocket connections
-_connections: set[WebSocket] = set()
+router = APIRouter(prefix="/ws", tags=["WebSocket"])
+
+HEARTBEAT_SECONDS = 30.0
+MAX_CLIENT_MESSAGE = 4096
+
+CLOSE_UNAUTHORIZED = 4401
+CLOSE_FORBIDDEN = 4403
+
+
+async def _authenticate(ws: WebSocket, runtime: AgentRuntime) -> Principal | None:
+    if runtime.authenticator is None:
+        return ANONYMOUS
+
+    token: str | None = None
+    header = ws.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+    else:
+        try:
+            raw = await asyncio.wait_for(ws.receive_text(), runtime.settings.ws_auth_timeout)
+            message = json.loads(raw) if len(raw) <= MAX_CLIENT_MESSAGE else {}
+            if isinstance(message, dict) and message.get("action") == "auth":
+                token = message.get("token")
+        except (asyncio.TimeoutError, json.JSONDecodeError, WebSocketDisconnect):
+            token = None
+
+    if not isinstance(token, str) or not token:
+        await ws.close(code=CLOSE_UNAUTHORIZED, reason="Authentication required")
+        return None
+    try:
+        return runtime.authenticator.authenticate(token)
+    except AuthError as exc:
+        code = (
+            CLOSE_FORBIDDEN if exc.status_code == status.HTTP_403_FORBIDDEN else CLOSE_UNAUTHORIZED
+        )
+        await ws.close(code=code, reason=str(exc))
+        return None
+
+
+async def _sender(ws: WebSocket, sub: Subscriber) -> None:
+    while True:
+        try:
+            envelope = await asyncio.wait_for(sub.queue.get(), HEARTBEAT_SECONDS)
+        except asyncio.TimeoutError:
+            envelope = {"type": "heartbeat"}
+        await ws.send_json(envelope)
+        if sub.overflowed:
+            # The client fell behind and events were dropped: end the stream so it
+            # reconnects, rather than silently serving a gappy one.
+            await ws.close(code=status.WS_1013_TRY_AGAIN_LATER, reason="Consumer too slow")
+            return
+
+
+async def _receiver(ws: WebSocket, sub: Subscriber) -> None:
+    while True:
+        raw = await ws.receive_text()
+        if len(raw) > MAX_CLIENT_MESSAGE:
+            await ws.send_json({"type": "error", "message": "Message too large"})
+            continue
+        try:
+            message = json.loads(raw)
+        except json.JSONDecodeError:
+            await ws.send_json({"type": "error", "message": "Invalid JSON"})
+            continue
+        if not isinstance(message, dict):
+            await ws.send_json({"type": "error", "message": "Expected a JSON object"})
+            continue
+
+        action = message.get("action")
+        if action == "ping":
+            await ws.send_json({"type": "pong"})
+        elif action in ("subscribe", "unsubscribe"):
+            requested = message.get("event_types", [])
+            if not isinstance(requested, list) or not all(isinstance(t, str) for t in requested):
+                await ws.send_json(
+                    {"type": "error", "message": "event_types must be a list of strings"}
+                )
+                continue
+            unknown = sorted(set(requested) - KNOWN_EVENT_TYPES)
+            if unknown:
+                await ws.send_json(
+                    {
+                        "type": "error",
+                        "message": f"Unknown event types: {unknown}",
+                        "known": sorted(KNOWN_EVENT_TYPES),
+                    }
+                )
+                continue
+            if action == "subscribe":
+                sub.event_types.update(requested)
+                agent_id = message.get("agent_id")
+                if isinstance(agent_id, str):
+                    sub.agent_id = agent_id
+            else:
+                sub.event_types.difference_update(requested)
+            await ws.send_json(
+                {
+                    "type": "subscribed",
+                    "event_types": sorted(sub.event_types),
+                    "agent_id": sub.agent_id,
+                }
+            )
+        else:
+            await ws.send_json({"type": "error", "message": f"Unknown action '{action}'"})
+
+
+async def _serve(ws: WebSocket, agent_id: str | None) -> None:
+    runtime: AgentRuntime = ws.app.state.runtime
+    await ws.accept()
+
+    principal = await _authenticate(ws, runtime)
+    if principal is None:
+        return
+
+    sub = runtime.hub.subscribe(can_see_messages=principal.role >= Role.OPERATOR)
+    if sub is None:
+        await ws.close(code=status.WS_1013_TRY_AGAIN_LATER, reason="Too many connections")
+        return
+    sub.agent_id = agent_id
+
+    sender: asyncio.Task[None] | None = None
+    try:
+        await ws.send_json(
+            {
+                "type": "connected",
+                "subject": principal.subject,
+                "event_types": sorted(KNOWN_EVENT_TYPES),
+            }
+        )
+        sender = asyncio.create_task(_sender(ws, sub))
+        sender.add_done_callback(_consume_result)
+        await _receiver(ws, sub)
+    except (WebSocketDisconnect, RuntimeError):
+        pass  # client went away, or the socket was closed under us
+    finally:
+        if sender is not None:
+            sender.cancel()
+        runtime.hub.unsubscribe(sub)
+
+
+def _consume_result(task: asyncio.Task[None]) -> None:
+    """Retrieve the sender's outcome so failures are logged, never left unretrieved."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc and not isinstance(exc, (WebSocketDisconnect, RuntimeError)):
+        logger.error("WebSocket sender failed: %s", exc)
 
 
 @router.websocket("/events")
-async def websocket_events(websocket: WebSocket):
-    """WebSocket endpoint for real-time event updates.
-
-    Clients can subscribe to agent events and receive real-time updates about:
-    - Agent state changes
-    - Task assignments
-    - Task completions/failures
-    - Inter-agent messages
-    - System events
-
-    Example client usage:
-        ```javascript
-        const ws = new WebSocket('ws://localhost:8000/api/agents/ws/events');
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log('Event:', data.event_type, data.payload);
-        };
-
-        // Subscribe to specific event types
-        ws.send(JSON.stringify({
-            action: 'subscribe',
-            event_types: ['task_assigned', 'task_completed', 'agent_message']
-        }));
-        ```
-    """
-    await websocket.accept()
-    _connections.add(websocket)
-
-    logger.info(f"WebSocket client connected. Total connections: {len(_connections)}")
-
-    # Track subscribed event types
-    subscribed_events: set[str] = set()
-
-    try:
-        # Send welcome message
-        await websocket.send_json({
-            "type": "connection",
-            "message": "Connected to agent event stream",
-            "timestamp": asyncio.get_event_loop().time(),
-        })
-
-        # Create event listener task
-        event_task = asyncio.create_task(_stream_events(websocket, subscribed_events))
-
-        # Handle incoming messages
-        while True:
-            try:
-                # Receive messages from client
-                data = await websocket.receive_text()
-                message = json.loads(data)
-
-                # Handle subscribe action
-                if message.get("action") == "subscribe":
-                    event_types = message.get("event_types", [])
-                    subscribed_events.update(event_types)
-
-                    await websocket.send_json({
-                        "type": "subscription",
-                        "message": f"Subscribed to {len(event_types)} event types",
-                        "subscribed_events": list(subscribed_events),
-                    })
-
-                # Handle unsubscribe action
-                elif message.get("action") == "unsubscribe":
-                    event_types = message.get("event_types", [])
-                    subscribed_events.difference_update(event_types)
-
-                    await websocket.send_json({
-                        "type": "subscription",
-                        "message": f"Unsubscribed from {len(event_types)} event types",
-                        "subscribed_events": list(subscribed_events),
-                    })
-
-                # Handle ping
-                elif message.get("action") == "ping":
-                    await websocket.send_json({
-                        "type": "pong",
-                        "timestamp": asyncio.get_event_loop().time(),
-                    })
-
-            except WebSocketDisconnect:
-                break
-            except json.JSONDecodeError:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": "Invalid JSON message",
-                })
-            except Exception as e:
-                logger.error(f"Error processing WebSocket message: {e}")
-                await websocket.send_json({
-                    "type": "error",
-                    "message": str(e),
-                })
-
-    except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        _connections.discard(websocket)
-        event_task.cancel()
-        logger.info(f"WebSocket client removed. Total connections: {len(_connections)}")
-
-
-async def _stream_events(websocket: WebSocket, subscribed_events: set[str]):
-    """Stream events to WebSocket client.
-
-    Args:
-        websocket: WebSocket connection
-        subscribed_events: Set of event types client is subscribed to
-    """
-    while True:
-        try:
-            # In a real implementation, this would listen to the event bus
-            # and forward events to the WebSocket client
-            #
-            # For now, send periodic heartbeat
-            await asyncio.sleep(30)
-
-            await websocket.send_json({
-                "type": "heartbeat",
-                "timestamp": asyncio.get_event_loop().time(),
-                "subscribed_events": list(subscribed_events),
-            })
-
-        except WebSocketDisconnect:
-            break
-        except Exception as e:
-            logger.error(f"Error streaming events: {e}")
-            break
+async def events(ws: WebSocket) -> None:
+    """Stream agent, task and workflow events."""
+    await _serve(ws, agent_id=None)
 
 
 @router.websocket("/agents/{agent_id}")
-async def websocket_agent(websocket: WebSocket, agent_id: str):
-    """WebSocket endpoint for agent-specific updates.
-
-    Subscribe to real-time updates for a specific agent.
-
-    Example client usage:
-        ```javascript
-        const ws = new WebSocket('ws://localhost:8000/api/agents/ws/agents/engineer_001');
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log('Agent update:', data);
-        };
-        ```
-    """
-    await websocket.accept()
-
-    logger.info(f"WebSocket client connected for agent: {agent_id}")
-
-    try:
-        await websocket.send_json({
-            "type": "connection",
-            "agent_id": agent_id,
-            "message": f"Connected to agent {agent_id} event stream",
-            "timestamp": asyncio.get_event_loop().time(),
-        })
-
-        # Stream agent-specific updates
-        while True:
-            # In real implementation, listen to agent events
-            await asyncio.sleep(30)
-
-            await websocket.send_json({
-                "type": "heartbeat",
-                "agent_id": agent_id,
-                "timestamp": asyncio.get_event_loop().time(),
-            })
-
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket client disconnected for agent: {agent_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for agent {agent_id}: {e}")
-
-
-async def broadcast_event(event_type: str, payload: dict):
-    """Broadcast event to all connected WebSocket clients.
-
-    Args:
-        event_type: Type of event
-        payload: Event payload data
-    """
-    if not _connections:
-        return
-
-    message = {
-        "type": "event",
-        "event_type": event_type,
-        "payload": payload,
-        "timestamp": asyncio.get_event_loop().time(),
-    }
-
-    # Send to all connections (handle disconnections gracefully)
-    disconnected = set()
-
-    for connection in _connections:
-        try:
-            await connection.send_json(message)
-        except Exception as e:
-            logger.warning(f"Failed to send to WebSocket client: {e}")
-            disconnected.add(connection)
-
-    # Remove disconnected clients
-    _connections.difference_update(disconnected)
+async def agent_events(ws: WebSocket, agent_id: str) -> None:
+    """Stream events involving one agent."""
+    await _serve(ws, agent_id=agent_id)

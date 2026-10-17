@@ -1,73 +1,51 @@
-"""API schemas for agent framework."""
+"""Request/response schemas for the agent API."""
 
 from unistax.agents.api.schemas.agents import (
     AgentResponse,
     CreateAgentRequest,
     UpdateAgentRequest,
-    AgentListResponse,
-    AgentStatsResponse,
 )
-from unistax.agents.api.schemas.tasks import (
-    TaskRequest,
-    TaskResponse,
-    TaskListResponse,
-    TaskStatusUpdate,
-)
-from unistax.agents.api.schemas.teams import (
-    TeamResponse,
-    CreateTeamRequest,
-    UpdateTeamRequest,
-    TeamListResponse,
-)
-from unistax.agents.api.schemas.workflows import (
-    WorkflowRequest,
-    WorkflowResponse,
-    WorkflowStepResponse,
-    WorkflowStatusResponse,
-)
+from unistax.agents.api.schemas.common import paginate
 from unistax.agents.api.schemas.knowledge import (
-    KnowledgeNodeResponse,
-    KnowledgeEdgeResponse,
-    AddNodeRequest,
     AddEdgeRequest,
+    AddNodeRequest,
     BestPracticeRequest,
     IssueRequest,
+    KnowledgeEdgeResponse,
+    KnowledgeNodeResponse,
 )
-from unistax.agents.api.schemas.metrics import (
-    AgentMetricsResponse,
-    SystemMetricsResponse,
+from unistax.agents.api.schemas.metrics import AgentMetricsResponse, SystemMetricsResponse
+from unistax.agents.api.schemas.tasks import TaskRequest, TaskResponse
+from unistax.agents.api.schemas.teams import CreateTeamRequest, TeamResponse, UpdateTeamRequest
+from unistax.agents.api.schemas.workflows import (
+    CreateWorkflowRequest,
+    WorkflowResponse,
+    WorkflowStatusResponse,
+    WorkflowStepRequest,
+    WorkflowStepResponse,
 )
 
 __all__ = [
-    # Agents
+    "AddEdgeRequest",
+    "AddNodeRequest",
+    "AgentMetricsResponse",
     "AgentResponse",
+    "BestPracticeRequest",
     "CreateAgentRequest",
-    "UpdateAgentRequest",
-    "AgentListResponse",
-    "AgentStatsResponse",
-    # Tasks
+    "CreateTeamRequest",
+    "CreateWorkflowRequest",
+    "IssueRequest",
+    "KnowledgeEdgeResponse",
+    "KnowledgeNodeResponse",
+    "SystemMetricsResponse",
     "TaskRequest",
     "TaskResponse",
-    "TaskListResponse",
-    "TaskStatusUpdate",
-    # Teams
     "TeamResponse",
-    "CreateTeamRequest",
+    "UpdateAgentRequest",
     "UpdateTeamRequest",
-    "TeamListResponse",
-    # Workflows
-    "WorkflowRequest",
     "WorkflowResponse",
-    "WorkflowStepResponse",
     "WorkflowStatusResponse",
-    # Knowledge
-    "KnowledgeNodeResponse",
-    "KnowledgeEdgeResponse",
-    "AddNodeRequest",
-    "AddEdgeRequest",
-    "BestPracticeRequest",
-    "IssueRequest",
-    # Metrics
-    "AgentMetricsResponse",
-    "SystemMetricsResponse",
+    "WorkflowStepRequest",
+    "WorkflowStepResponse",
+    "paginate",
 ]

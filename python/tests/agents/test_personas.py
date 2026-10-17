@@ -1,5 +1,7 @@
 """Tests for agent personas."""
 
+import asyncio
+
 import pytest
 
 from unistax.agents.base import Skill, Task
