@@ -16,6 +16,7 @@ from unistax.agents.api.schemas import (
     paginate,
 )
 from unistax.agents.api.services.agents import resolve_persona, to_skills
+from unistax.agents.api.services.swarm import NO_BACKEND_MESSAGE
 from unistax.agents.base import Agent
 from unistax.api import APIResponse, PaginatedResponse
 
@@ -52,6 +53,11 @@ async def create_agent(
         )
     if runtime.registry.get(body.agent_id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Agent '{body.agent_id}' already exists")
+    if persona == "claude_worker" and runtime.llm is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            NO_BACKEND_MESSAGE,
+        )
     _require_team(runtime, body.team_id)
 
     agent = runtime.new_agent(

@@ -305,3 +305,114 @@ class TestLoggingContext:
             get_logger("tests.core").info("no context set")  # used to raise TypeError
         finally:
             log_context.reset(token)
+
+
+class TestOrchestratorDependenciesAndCapacity:
+    async def test_steps_receive_the_results_of_their_dependencies(self):
+        seen: dict[str, dict] = {}
+
+        class Recorder(DataEngineerAgent):
+            async def _run_quality_check(self, context):
+                seen[context.get("name", "?")] = context.get("dependency_results")
+                return {"status": "success", "name": context.get("name")}
+
+        registry = AgentRegistry()
+        registry.register(Recorder("eng", event_bus=registry.event_bus))
+
+        def named(step_id, deps=()):
+            s = step(step_id, deps=deps)
+            s.task.context["name"] = step_id
+            return s
+
+        workflow = make_workflow(named("a"), named("b"), named("c", deps=["a", "b"]))
+        await AgentOrchestrator(registry).execute_workflow(workflow)
+
+        assert seen["a"] is None and seen["b"] is None  # no dependencies, nothing injected
+        assert set(seen["c"]) == {"a", "b"}
+        assert seen["c"]["a"]["name"] == "a" and seen["c"]["b"]["status"] == "success"
+
+    async def test_only_completed_dependencies_are_passed_on(self):
+        seen = {}
+
+        class Recorder(DataEngineerAgent):
+            async def _run_quality_check(self, context):
+                seen[context["name"]] = context.get("dependency_results")
+                return {"status": "success"}
+
+        registry = AgentRegistry()
+        registry.register(Recorder("eng", event_bus=registry.event_bus))
+        workflow = make_workflow(step("a"), step("b", deps=["a"]))
+        for s in workflow.steps:
+            s.task.context["name"] = s.id
+        await AgentOrchestrator(registry).execute_workflow(workflow)
+        assert list(seen["b"]) == ["a"]
+
+    async def test_a_retried_step_gets_fresh_dependency_results_not_stale_ones(self):
+        attempts = []
+
+        class Flaky(DataEngineerAgent):
+            async def _run_quality_check(self, context):
+                if context.get("name") == "b":
+                    attempts.append(dict(context.get("dependency_results") or {}))
+                    if len(attempts) == 1:
+                        raise RuntimeError("transient")
+                return {"status": "success", "name": context.get("name")}
+
+        registry = AgentRegistry()
+        registry.register(Flaky("eng", event_bus=registry.event_bus))
+        a, b = step("a"), step("b", deps=["a"], retries=3)
+        a.task.context["name"], b.task.context["name"] = "a", "b"
+        await AgentOrchestrator(registry).execute_workflow(make_workflow(a, b))
+        assert len(attempts) == 2 and attempts[0] == attempts[1] and list(attempts[1]) == ["a"]
+
+    async def test_steps_wait_for_a_busy_agent_instead_of_failing(self):
+        running = peak = 0
+
+        class Slow(DataEngineerAgent):
+            async def _run_quality_check(self, context):
+                nonlocal running, peak
+                running += 1
+                peak = max(peak, running)
+                await asyncio.sleep(0.05)
+                running -= 1
+                return {"status": "success"}
+
+        registry = AgentRegistry()
+        registry.register(Slow("eng", event_bus=registry.event_bus, max_concurrent_tasks=2))
+        workflow = make_workflow(*[step(f"s{i}") for i in range(6)])
+
+        result = await AgentOrchestrator(registry).execute_workflow(
+            workflow, max_concurrent_steps=6
+        )
+
+        assert result["status"] == "completed" and result["steps_completed"] == 6
+        assert peak == 2  # never more than the agent's capacity at once
+
+    async def test_a_step_with_no_suitable_agent_still_fails_immediately(self):
+        registry = AgentRegistry()
+        started = asyncio.get_running_loop().time()
+        result = await AgentOrchestrator(registry, capacity_wait_seconds=30).execute_workflow(
+            make_workflow(step("a"))
+        )
+        assert result["status"] == "failed"
+        assert asyncio.get_running_loop().time() - started < 5
+
+    async def test_waiting_for_capacity_gives_up_after_the_limit(self):
+        class Stuck(DataEngineerAgent):
+            async def _run_quality_check(self, context):
+                await asyncio.sleep(5)
+
+        registry = AgentRegistry()
+        registry.register(Stuck("eng", event_bus=registry.event_bus, max_concurrent_tasks=1))
+        workflow = make_workflow(step("a"), step("b"))
+        orchestrator = AgentOrchestrator(registry, capacity_wait_seconds=0.3)
+
+        job = asyncio.create_task(orchestrator.execute_workflow(workflow, max_concurrent_steps=2))
+        await asyncio.sleep(1.0)
+        states = {s.id: s.status for s in workflow.steps}
+        job.cancel()
+        await asyncio.gather(job, return_exceptions=True)
+
+        assert StepStatus.FAILED in states.values()  # the one that could not get a slot
+        failed = next(s for s in workflow.steps if s.status == StepStatus.FAILED)
+        assert "became free" in failed.error

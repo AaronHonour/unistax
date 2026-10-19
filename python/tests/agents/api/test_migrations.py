@@ -90,15 +90,28 @@ async def test_adopts_a_database_created_by_the_old_create_all_path(db):
     assert [r[0] for r in rows] == ["keep-me"]  # data untouched
 
 
-async def test_downgrade_removes_the_tables_and_upgrade_restores_them(db):
+async def test_downgrade_steps_back_one_migration_at_a_time(db):
     await migrate.upgrade(db)
-    await migrate.downgrade(db)
 
+    await migrate.downgrade(db)  # the most recent migration only
+    assert await migrate.current_revision(db) == "0001"
+    present = await table_names(db)
+    assert "agent_api_swarms" not in present and (TABLES - {"agent_api_swarms"}) <= present
+
+    await migrate.downgrade(db, "base")
     assert not (TABLES & await table_names(db))
     assert await migrate.current_revision(db) is None
 
     await migrate.upgrade(db)
     assert TABLES <= await table_names(db)
+    assert await migrate.current_revision(db) == migrate.head_revision()
+
+
+async def test_each_migration_can_be_applied_on_its_own(db):
+    await migrate.upgrade(db, "0001")
+    assert "agent_api_swarms" not in await table_names(db)
+    await migrate.upgrade(db)
+    assert "agent_api_swarms" in await table_names(db)
 
 
 async def test_ensure_current_demands_migration(db):
@@ -227,7 +240,7 @@ class TestCommandLine:
         assert code == 0 and out.strip() == migrate.head_revision()
 
         code, out, _ = self.run_cli(monkeypatch, capsys, tmp_path, "downgrade")
-        assert code == 0 and "none" in out
+        assert code == 0 and "0001" in out  # one step back, not all the way
 
 
 def test_head_revision_is_a_single_linear_head():

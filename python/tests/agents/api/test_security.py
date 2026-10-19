@@ -153,6 +153,7 @@ class TestAuthorisation:
             "status": "ready",
             "database": True,
             "datasource": "not_configured",
+            "llm": "not_configured",
         }
 
 

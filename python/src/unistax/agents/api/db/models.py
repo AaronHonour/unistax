@@ -95,6 +95,25 @@ class WorkflowRecord(ApiBase):
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
+class SwarmRecord(ApiBase):
+    __tablename__ = "agent_api_swarms"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal: Mapped[str] = mapped_column(Text)
+    context: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
 class KnowledgeNodeRecord(ApiBase):
     __tablename__ = "agent_api_knowledge_nodes"
 

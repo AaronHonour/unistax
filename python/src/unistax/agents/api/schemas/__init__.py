@@ -15,6 +15,12 @@ from unistax.agents.api.schemas.knowledge import (
     KnowledgeNodeResponse,
 )
 from unistax.agents.api.schemas.metrics import AgentMetricsResponse, SystemMetricsResponse
+from unistax.agents.api.schemas.swarms import (
+    CreateSwarmRequest,
+    SwarmResponse,
+    SwarmStepResponse,
+    SwarmSummary,
+)
 from unistax.agents.api.schemas.tasks import TaskRequest, TaskResponse
 from unistax.agents.api.schemas.teams import CreateTeamRequest, TeamResponse, UpdateTeamRequest
 from unistax.agents.api.schemas.workflows import (
@@ -32,11 +38,15 @@ __all__ = [
     "AgentResponse",
     "BestPracticeRequest",
     "CreateAgentRequest",
+    "CreateSwarmRequest",
     "CreateTeamRequest",
     "CreateWorkflowRequest",
     "IssueRequest",
     "KnowledgeEdgeResponse",
     "KnowledgeNodeResponse",
+    "SwarmResponse",
+    "SwarmStepResponse",
+    "SwarmSummary",
     "SystemMetricsResponse",
     "TaskRequest",
     "TaskResponse",

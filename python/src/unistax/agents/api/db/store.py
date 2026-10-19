@@ -14,6 +14,7 @@ from unistax.agents.api.db.models import (
     AgentRecord,
     KnowledgeEdgeRecord,
     KnowledgeNodeRecord,
+    SwarmRecord,
     TaskRecord,
     TeamRecord,
     WorkflowRecord,
@@ -203,6 +204,45 @@ class Store:
                     for step_id, step in (record.progress or {}).items()
                 }
             return len(records)
+
+    # -- swarms ---------------------------------------------------------
+    async def create_swarm(self, **values: Any) -> SwarmRecord:
+        record = SwarmRecord(**values)
+        async with self.db.session() as s:
+            s.add(record)
+        return record
+
+    async def update_swarm(self, swarm_id: str, **values: Any) -> None:
+        async with self.db.session() as s:
+            await s.execute(update(SwarmRecord).where(SwarmRecord.id == swarm_id).values(**values))
+
+    async def get_swarm(self, swarm_id: str) -> SwarmRecord | None:
+        async with self.db.session() as s:
+            return await s.get(SwarmRecord, swarm_id)
+
+    async def list_swarms(
+        self, *, status: str | None = None, offset: int = 0, limit: int = 50
+    ) -> tuple[list[SwarmRecord], int]:
+        filters = [SwarmRecord.status == status] if status else []
+        async with self.db.session() as s:
+            total = await s.scalar(select(func.count()).select_from(SwarmRecord).where(*filters))
+            rows = await s.scalars(
+                select(SwarmRecord)
+                .where(*filters)
+                .order_by(SwarmRecord.created_at.desc(), SwarmRecord.id)
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(rows.all()), int(total or 0)
+
+    async def fail_interrupted_swarms(self, reason: str) -> int:
+        async with self.db.session() as s:
+            result = await s.execute(
+                update(SwarmRecord)
+                .where(SwarmRecord.status.in_(("planning", "running")))
+                .values(status="failed", error=reason, completed_at=utcnow())
+            )
+            return int(cast(CursorResult[Any], result).rowcount or 0)
 
     # -- knowledge graph ------------------------------------------------
     async def upsert_node(self, **values: Any) -> None:

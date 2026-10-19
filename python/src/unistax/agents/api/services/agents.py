@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from unistax.agents.base import Agent, Skill
+from unistax.agents.personas.claude_worker import ClaudeWorkerAgent
 from unistax.agents.personas.data_analyst import DataAnalystAgent
 from unistax.agents.personas.data_engineer import DataEngineerAgent
 from unistax.agents.personas.data_scientist import DataScientistAgent
@@ -18,6 +19,7 @@ PERSONAS: dict[str, Callable[..., Agent]] = {
     "data_analyst": DataAnalystAgent,
     "data_scientist": DataScientistAgent,
     "data_steward": DataStewardAgent,
+    "claude_worker": ClaudeWorkerAgent,
 }
 
 _ALIASES = {
@@ -25,6 +27,8 @@ _ALIASES = {
     "analyst": "data_analyst",
     "scientist": "data_scientist",
     "steward": "data_steward",
+    "claude": "claude_worker",
+    "worker": "claude_worker",
 }
 
 
@@ -57,11 +61,14 @@ def build_agent(
     skills: dict[str, float] | None = None,
     max_concurrent_tasks: int = 3,
     datasource: Any = None,
+    llm: Any = None,
 ) -> Agent:
     factory = PERSONAS[persona]
     extra: dict[str, Any] = {}
     if getattr(factory, "USES_DATASOURCE", False):
         extra["datasource"] = datasource
+    if getattr(factory, "USES_LLM", False):
+        extra["llm"] = llm
     return factory(
         agent_id=agent_id,
         event_bus=event_bus,

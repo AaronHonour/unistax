@@ -54,6 +54,24 @@ class AgentAPISettings:
     datasource_pool_size: int = 3
     datasource_session_defaults: bool = True
 
+    # Language model access for swarms. "claude_cli" runs the unmodified Claude Code CLI in
+    # headless mode with whatever login that CLI already has. Single-operator use only: see
+    # AGENTS.md before enabling.
+    llm_backend: str = "none"
+    llm_claude_path: str = "claude"
+    llm_model: str | None = None
+    llm_effort: str | None = None
+    llm_max_concurrency: int = 2
+    llm_call_timeout: float = 300.0
+    llm_cooldown_seconds: float = 600.0
+
+    # Swarms
+    swarm_max_subtasks: int = 8
+    swarm_max_calls: int = 20
+    swarm_max_active: int = 2
+    swarm_max_context_chars: int = 20_000
+    swarm_workers: int = 1
+
     # HTTP
     api_prefix: str = "/api/v1"
     cors_origins: tuple[str, ...] = ()
@@ -139,6 +157,29 @@ class AgentAPISettings:
             raise ValueError("api_prefix must start with '/' and must not end with '/'")
         if self.max_running_tasks < 1:
             raise ValueError("max_running_tasks must be >= 1")
+        if self.llm_backend not in {"none", "claude_cli"}:
+            raise ValueError("llm_backend must be 'none' or 'claude_cli'")
+        if self.llm_effort is not None and self.llm_effort not in {
+            "low", "medium", "high", "xhigh", "max"
+        }:  # fmt: skip
+            raise ValueError("llm_effort must be one of low, medium, high, xhigh, max")
+        for name in (
+            "llm_max_concurrency",
+            "swarm_max_subtasks",
+            "swarm_max_calls",
+            "swarm_max_active",
+            "swarm_max_context_chars",
+            "swarm_workers",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1")
+        if self.llm_call_timeout <= 0 or self.llm_cooldown_seconds < 0:
+            raise ValueError("llm_call_timeout must be > 0 and llm_cooldown_seconds >= 0")
+        if self.swarm_max_calls < self.swarm_max_subtasks + 2:
+            raise ValueError(
+                "swarm_max_calls must be at least swarm_max_subtasks + 2 "
+                "(one call per step plus planning and synthesis)"
+            )
         if self.datasource_url:
             self.datasource_config().validate()
         if self.priority_aging_seconds < 0:

@@ -171,15 +171,20 @@ class AgentOrchestrator:
         self,
         registry: AgentRegistry,
         event_bus: EventBus | None = None,
+        capacity_wait_seconds: float = 600.0,
     ):
         """Initialize orchestrator.
 
         Args:
             registry: Agent registry for agent lookup
             event_bus: Optional EventBus for events
+            capacity_wait_seconds: How long a step waits for a suitable agent that is
+                busy before giving up. A step with *no* suitable agent registered fails
+                immediately.
         """
         self.registry = registry
         self.event_bus = event_bus or registry.event_bus
+        self.capacity_wait_seconds = capacity_wait_seconds
 
         # Workflow tracking
         self.workflows: dict[str, Workflow] = {}
@@ -360,23 +365,21 @@ class AgentOrchestrator:
         step.started_at = datetime.now()
 
         try:
-            # Find agent to execute step
-            agent = await self._find_agent_for_step(step)
-            if not agent:
-                raise ValueError(
-                    f"No suitable agent found for step {step.name} "
-                    f"(persona={step.agent_persona})"
-                )
-
-            step.agent_id = agent.agent_id
-            step.status = StepStatus.RUNNING
-
-            # Run through the full task lifecycle (capacity, state, metrics, events)
+            # Give the step what its dependencies produced (a fresh copy each attempt)
             task = step.task
+            if step.dependencies:
+                task.context = {
+                    **{k: v for k, v in task.context.items() if k != "dependency_results"},
+                    "dependency_results": self._dependency_results(workflow, step),
+                }
             task.error = None
             task.completed_at = None
-            if not await agent.accept_task(task):
-                raise RuntimeError(f"Agent {agent.agent_id} is at capacity")
+
+            # Find an agent with room (waiting if suitable agents exist but are busy), then
+            # run through the full task lifecycle (state, metrics, events)
+            agent = await self._acquire_agent(step, task)
+            step.agent_id = agent.agent_id
+            step.status = StepStatus.RUNNING
             await agent.run_task(task)
             if task.status != TaskStatus.COMPLETED:
                 raise RuntimeError(task.error or "Task did not complete")
@@ -413,6 +416,48 @@ class AgentOrchestrator:
             else:
                 step.status = StepStatus.FAILED
                 step.completed_at = datetime.now()
+
+    @staticmethod
+    def _dependency_results(workflow: Workflow, step: WorkflowStep) -> dict[str, Any]:
+        """Results of the completed steps that ``step`` depends on, by step id."""
+        results: dict[str, Any] = {}
+        for dep_id in step.dependencies:
+            dep = workflow.get_step(dep_id)
+            if dep is not None and dep.status == StepStatus.COMPLETED:
+                results[dep_id] = dep.result
+        return results
+
+    def _has_candidates(self, step: WorkflowStep) -> bool:
+        """Whether any registered agent could ever run this step (busy or not)."""
+        if step.agent_id:
+            return self.registry.get(step.agent_id) is not None
+        if step.agent_persona:
+            return bool(self.registry.find_by_persona(step.agent_persona))
+        return False
+
+    async def _acquire_agent(self, step: WorkflowStep, task: Task):
+        """An agent that has accepted ``task``, waiting for capacity if need be.
+
+        Raises:
+            ValueError: No suitable agent is registered, or none freed up in time.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.capacity_wait_seconds
+        while True:
+            agent = await self._find_agent_for_step(step)
+            if agent is not None and await agent.accept_task(task):
+                return agent
+            if not self._has_candidates(step):
+                raise ValueError(
+                    f"No suitable agent found for step {step.name} "
+                    f"(persona={step.agent_persona})"
+                )
+            if loop.time() >= deadline:
+                raise ValueError(
+                    f"No agent became free for step {step.name} within "
+                    f"{self.capacity_wait_seconds:g}s"
+                )
+            await asyncio.sleep(0.05)
 
     async def _find_agent_for_step(self, step: WorkflowStep):
         """Find suitable agent for workflow step.

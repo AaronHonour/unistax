@@ -222,6 +222,15 @@ class WorkflowRunner:
     def _on_done(self, workflow_id: str, _job: asyncio.Task[None]) -> None:
         self._jobs.pop(workflow_id, None)
 
+    async def wait(self, workflow_id: str) -> None:
+        """Return once ``workflow_id`` is no longer running (immediately if it is not).
+
+        Cancelling the caller does not cancel the workflow.
+        """
+        job = self._jobs.get(workflow_id)
+        if job is not None:
+            await asyncio.wait([job])
+
     async def cancel(self, workflow_id: str) -> bool:
         job = self._jobs.get(workflow_id)
         if job is None or job.done():

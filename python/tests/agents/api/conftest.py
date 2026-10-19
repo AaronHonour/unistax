@@ -131,3 +131,81 @@ def wait_task(client, headers, task_id, timeout=10.0) -> dict:
     return wait_for(
         lambda: task_state(client, headers, task_id), lambda t: t["status"] in TERMINAL, timeout
     )
+
+
+# ---------------------------------------------------------------------------
+# Swarm helpers: an API whose model is scripted
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def make_swarm_client(settings):
+    """Start the API with a scripted language model; returns (client, backend, runtime)."""
+    from unistax.agents.api import AgentRuntime
+    from unistax.agents.llm import ScriptedBackend
+
+    started: list[TestClient] = []
+
+    def factory(handler, *, delay: float = 0.0, **overrides):
+        configured = replace(settings, **overrides)
+        backend = ScriptedBackend(handler, delay=delay)
+        runtime = AgentRuntime(configured, llm_backend=backend)
+        client = TestClient(create_agent_api(configured, runtime=runtime))
+        client.__enter__()
+        started.append(client)
+        return client, backend, runtime
+
+    yield factory
+    for client in reversed(started):
+        try:
+            client.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def plan_step(step_id, role="analyst", depends_on=(), **extra):
+    return {
+        "id": step_id,
+        "role": role,
+        "title": f"Step {step_id}",
+        "instructions": f"Carry out part {step_id} of the work thoroughly.",
+        "depends_on": list(depends_on),
+        **extra,
+    }
+
+
+def scripted_swarm(steps, *, review=None, intercept=None):
+    """A model handler: returns `steps` as the plan, then simple answers for each role."""
+
+    def handler(request):
+        if intercept is not None:
+            outcome = intercept(request)
+            if outcome is not None:
+                return outcome
+        if request.label == "plan":
+            return {"rationale": "split into parts", "steps": steps}
+        role, _, title = request.label.partition(":")
+        if role == "critic":
+            return review or {"verdict": "approve", "summary": "looks right", "issues": []}
+        if role == "synthesizer":
+            return "FINAL ANSWER combining all parts"
+        return f"result of {title}"
+
+    return handler
+
+
+SWARM_DONE = ("completed", "failed", "cancelled")
+
+
+def swarm_state(client, headers, swarm_id) -> dict:
+    return client.get(f"{API}/swarms/{swarm_id}", headers=headers).json()["data"]
+
+
+def wait_swarm(client, headers, swarm_id, timeout=20.0) -> dict:
+    return wait_for(
+        lambda: swarm_state(client, headers, swarm_id), lambda s: s["status"] in SWARM_DONE, timeout
+    )
+
+
+def start_swarm(client, headers, goal="Assess the quality of our onboarding flow", **extra) -> dict:
+    response = client.post(f"{API}/swarms", json={"goal": goal, **extra}, headers=headers)
+    assert response.status_code == 202, response.text
+    return response.json()["data"]

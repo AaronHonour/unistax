@@ -964,6 +964,96 @@ Agents write what they learn to the knowledge graph (persisted, queryable at
 - Other task types remain simulated, and `unistax.agents.task_integration` (Celery) is
   still a placeholder.
 
+## Agent swarm (LLM-driven, via Claude Code)
+
+A swarm turns one goal into a plan, runs the plan's steps in parallel on `claude_worker`
+agents, synthesises their outputs and (optionally) has a critic review the result. Model
+calls go through the **Claude Code CLI in headless mode** (`claude -p`), using whatever login
+that CLI already has. No Anthropic API key is involved.
+
+```
+goal ─▶ planner (1 call, JSON validated, one repair) ─▶ steps run as a workflow (DAG, parallel)
+     ─▶ synthesize (1 call) ─▶ review (1 call, optional: verdict ok | revise + issues)
+```
+
+### Enabling it
+
+```bash
+claude            # log in once, interactively, on the machine that runs the service
+export UNISTAX_AGENT_API_LLM_BACKEND=claude_cli
+python -m unistax.agents.api
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/v1/llm      # operator: verifies the CLI, no model call
+curl -X POST localhost:8000/api/v1/swarms -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"goal":"Recommend how to validate signup emails","context":"2k signups/month","review":true}'
+```
+
+`POST /swarms` returns `202`; poll `GET /swarms/{id}` (live per-step progress) or watch the
+`swarm_finished` event. A verified end-to-end run (planner, two workers, synthesis, review, `haiku`,
+low effort) took about 45 seconds and 5 calls.
+
+| Endpoint (under `/api/v1`) | Role | Purpose |
+|---|---|---|
+| `POST /swarms` | operator | Start a swarm (`goal`, `context`, `max_subtasks`, `review`, `model`, `effort`) |
+| `GET /swarms`, `GET /swarms/{id}` | viewer | List / inspect (plan, steps, final answer, review, usage) |
+| `POST /swarms/{id}/cancel` | operator | Cancel a planning or running swarm |
+| `GET /llm` | operator | Backend status and gateway counters |
+
+### Configuration (prefix `UNISTAX_AGENT_API_`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_BACKEND` | `none` | `claude_cli` to enable. With `none`, swarms return 409 |
+| `LLM_CLAUDE_PATH` | `claude` | Path to the CLI |
+| `LLM_MODEL`, `LLM_EFFORT` | CLI default | Default model alias and effort (`low`..`max`) |
+| `LLM_MAX_CONCURRENCY` | `2` | Concurrent CLI processes |
+| `LLM_CALL_TIMEOUT` | `300` | Seconds per call (the process group is killed) |
+| `LLM_COOLDOWN_SECONDS` | `600` | Pause after a usage-limit error (circuit breaker) |
+| `SWARM_MAX_SUBTASKS` | `8` | Steps the planner may create (request can only lower it) |
+| `SWARM_MAX_CALLS` | `20` | Hard call budget per swarm, retries included; must be >= subtasks + 2 |
+| `SWARM_MAX_ACTIVE` | `2` | Swarms running at once (429 above) |
+| `SWARM_MAX_CONTEXT_CHARS` | `20000` | Size of the `context` field |
+| `SWARM_WORKERS` | `1` | `claude_worker` agents created at start |
+
+### Read this before using it: subscription use
+
+- **Single operator.** Claude subscription logins are for ordinary, individual use of the
+  unmodified CLI. Run this for yourself. Do not expose the API to other people or build a
+  service that routes their requests through your plan. When you have API access, use it for that.
+- **Quota is shared** with your interactive Claude Code use. Swarms make several calls each; the
+  defaults are deliberately small (2 concurrent, 20 calls per swarm, a cooldown on usage-limit
+  errors that stops further calls rather than hammering). `nominal_cost_usd` in `/llm` is an
+  API-price estimate, not a bill.
+- **Credentials are never touched.** The service does not read, store or forward the CLI's login.
+  Each call runs with a scrubbed environment (`PATH`, `HOME`, locale, proxy/cert variables and
+  `ANTHROPIC_*`/`CLAUDE_*` only) in a private temporary directory. For unattended hosts, use the CLI's own
+  `claude setup-token` flow.
+
+### Safety model
+
+- Workers have **no tools** (`--tools ""`, restricted, safe mode, no permission prompts, no
+  session persistence): they can only produce text. Nothing a model says is executed.
+- Material you supply and every upstream step output are placed in fenced blocks with a
+  per-prompt random marker and labelled untrusted data, so instructions embedded in them are
+  not followed as instructions. This lowers prompt-injection risk, it does not remove it.
+- Plans are validated (ids, roles, dependencies, cycles, size). Model/effort/tool values are
+  checked against allow-lists before they reach the command line. Error messages never echo
+  model output or CLI stderr.
+- Each swarm has a call budget; the gateway caps concurrency, retries only overload errors
+  with jittered backoff, and pauses after a usage-limit error.
+
+### Limits
+
+- **Output is only as reliable as the model.** The critic's `revise` verdict is reported, not
+  acted on automatically; read the issues. There is no web access or data access in v1, so
+  workers reason from your `goal` and `context` only.
+- No resume: swarms interrupted by a restart are marked `failed`. The goal, context and results
+  are stored in the database (migration `0002_swarms`); do not put secrets in them.
+- Still one process, one replica. The `claude` CLI must exist on the host, so the provided Docker
+  image does not enable it.
+- Tests use a fake `claude` executable and a scripted backend. Live calls are only exercised by
+  hand, never in CI.
+
 ## Intelligence Features
 
 The agent framework includes advanced intelligence capabilities that enable agents to learn, plan, and optimize collaboratively.
@@ -1236,7 +1326,9 @@ agent.htn_planner.add_operator(...)  # agent.htn_planner
 - [x] Graceful shutdown, restart recovery, health probes, Prometheus metrics
 - [x] Docker image + compose, CI job (SQLite + PostgreSQL)
 - [x] Schema migrations (Alembic), priority-ordered scheduling, bounded history, WebSocket rate limits
+- [x] LLM agent swarm via the Claude Code CLI (plan, parallel workers, synthesis, review)
 - [ ] Resume/retry of interrupted work
+- [ ] Give swarm workers safe tools (e.g. read-only data inspection)
 - [x] PostgreSQL data source (read-only): `catalog_dataset`, `document_schema`, `classify_data`, `quality_check`
 - [ ] Real implementations of the remaining persona tasks (orchestrators, ML platforms, query execution)
 

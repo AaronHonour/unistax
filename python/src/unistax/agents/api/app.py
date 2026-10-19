@@ -23,8 +23,10 @@ from unistax.agents.api.routers.agents import (
     datasource_router,
     discovery_router,
     knowledge_router,
+    llm_router,
     management_router,
     metrics_router,
+    swarms_router,
     tasks_router,
     teams_router,
     websocket_router,
@@ -96,6 +98,8 @@ def create_agent_api(
         knowledge_router,
         metrics_router,
         datasource_router,
+        swarms_router,
+        llm_router,
     ):
         api.include_router(router)
     app.include_router(api)
@@ -115,6 +119,7 @@ def create_agent_api(
             "status": "ready" if is_ready else "unavailable",
             "database": db_ok,
             "datasource": runtime.datasource_state,
+            "llm": runtime.llm_state,
         }
 
     @app.exception_handler(Exception)

@@ -110,6 +110,7 @@ class TestConfiguration:
                 "status": "ready",
                 "database": True,
                 "datasource": "unverified",
+                "llm": "not_configured",
             }
             info = client.get(f"{API}/datasource", headers=headers_for(down, "operator")).json()[
                 "data"

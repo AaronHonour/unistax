@@ -13,6 +13,7 @@ from unistax.agents.api.limits import RateLimits
 from unistax.agents.api.services.agents import build_agent
 from unistax.agents.api.services.events import EventHub
 from unistax.agents.api.services.executor import TaskExecutor
+from unistax.agents.api.services.swarm import SwarmRunner
 from unistax.agents.api.services.workflows import WorkflowRunner
 from unistax.agents.api.settings import AgentAPISettings
 from unistax.agents.base import Agent
@@ -25,6 +26,8 @@ from unistax.agents.intelligence.knowledge_graph import (
     NodeType,
     RelationType,
 )
+from unistax.agents.llm import LLMBackend, LLMGateway
+from unistax.agents.llm.claude_cli import BackendReport, ClaudeCLIConfig, ClaudeCodeBackend
 from unistax.agents.orchestrator import AgentOrchestrator
 from unistax.agents.registry import AgentRegistry
 from unistax.agents.team import Team, TeamType
@@ -46,6 +49,7 @@ class AgentRuntime:
         *,
         event_bus: EventBus | None = None,
         metrics_manager: MetricsManager | None = None,
+        llm_backend: LLMBackend | None = None,
     ) -> None:
         settings.validate()
         self.settings = settings
@@ -70,6 +74,37 @@ class AgentRuntime:
             PostgresDataSource(settings.datasource_config()) if settings.datasource_url else None
         )
 
+        self.llm: LLMGateway | None = None
+        self.llm_report: BackendReport | None = None
+        backend = llm_backend
+        if backend is None and settings.llm_backend == "claude_cli":
+            backend = ClaudeCodeBackend(
+                ClaudeCLIConfig(
+                    executable=settings.llm_claude_path,
+                    default_model=settings.llm_model,
+                    default_effort=settings.llm_effort,
+                    default_timeout=settings.llm_call_timeout,
+                )
+            )
+        if backend is not None:
+            self.llm = LLMGateway(
+                backend,
+                max_concurrency=settings.llm_max_concurrency,
+                cooldown_seconds=settings.llm_cooldown_seconds,
+            )
+        self.swarms: SwarmRunner | None = (
+            SwarmRunner(
+                registry=self.registry,
+                workflows=self.workflows,
+                store=self.store,
+                gateway=self.llm,
+                settings=settings,
+                event_bus=self.event_bus,
+            )
+            if self.llm is not None
+            else None
+        )
+
         self.started_at = time.time()
         self.ready = False
 
@@ -84,14 +119,18 @@ class AgentRuntime:
             await self._restore_agents()
             await self._restore_knowledge()
         await self._verify_datasource()
+        await self._verify_llm()
+        await self._ensure_swarm_workers()
 
         failed_tasks = await self.store.fail_interrupted_tasks(RESTART_REASON)
         failed_workflows = await self.store.fail_interrupted_workflows(RESTART_REASON)
-        if failed_tasks or failed_workflows:
+        failed_swarms = await self.store.fail_interrupted_swarms(RESTART_REASON)
+        if failed_tasks or failed_workflows or failed_swarms:
             logger.warning(
-                "Marked %d task(s) and %d workflow(s) as failed after restart",
+                "Marked %d task(s), %d workflow(s) and %d swarm(s) as failed after restart",
                 failed_tasks,
                 failed_workflows,
+                failed_swarms,
             )
 
         self.hub.attach()
@@ -105,6 +144,8 @@ class AgentRuntime:
     async def stop(self) -> None:
         self.ready = False
         timeout = self.settings.shutdown_timeout
+        if self.swarms is not None:
+            await self.swarms.shutdown(timeout)
         await self.workflows.shutdown(timeout)
         await self.executor.shutdown(timeout)
         self.hub.detach()
@@ -112,6 +153,8 @@ class AgentRuntime:
             agent.unsubscribe_from_events()
         if self.datasource is not None:
             await self.datasource.close()
+        if self.llm is not None:
+            await self.llm.close()
         await self.db.dispose()
         logger.info("Agent runtime stopped")
 
@@ -138,6 +181,44 @@ class AgentRuntime:
             report.server_version,
             report.role,
         )
+
+    async def _verify_llm(self) -> None:
+        """Check the model backend can run (no model call is made, so no quota is used).
+
+        A backend that was asked for but cannot run is a configuration error: startup fails.
+        """
+        if self.llm is None:
+            return
+        check = getattr(self.llm.backend, "check", None)
+        if check is None:
+            return
+        self.llm_report = await check()
+        logger.info("Model backend '%s' ready (%s)", self.llm.backend.name, self.llm_report.version)
+
+    async def _ensure_swarm_workers(self) -> None:
+        """Make sure enough ``claude_worker`` agents exist for swarms to use."""
+        if self.swarms is None:
+            return
+        existing = self.registry.find_by_persona("claude_worker")
+        capacity = max(self.settings.llm_max_concurrency * 4, 8)
+        number = 0
+        while len(existing) < self.settings.swarm_workers:
+            number += 1
+            agent_id = f"swarm-worker-{number}"
+            if self.registry.get(agent_id) is not None:
+                continue
+            agent = self.new_agent(
+                agent_id=agent_id, persona="claude_worker", max_concurrent_tasks=capacity
+            )
+            self.registry.register(agent)
+            await self.save_agent(agent)
+            existing.append(agent)
+            logger.info("Created swarm worker agent %s", agent_id)
+
+    @property
+    def llm_state(self) -> str:
+        """``not_configured`` or the backend name."""
+        return "not_configured" if self.llm is None else self.llm.backend.name
 
     @property
     def datasource_state(self) -> str:
@@ -166,6 +247,7 @@ class AgentRuntime:
             skills=skills,
             max_concurrent_tasks=max_concurrent_tasks,
             datasource=self.datasource,
+            llm=self.llm,
         )
         agent.knowledge_graph = self.knowledge_graph
         agent.knowledge_persister = self.persist_knowledge

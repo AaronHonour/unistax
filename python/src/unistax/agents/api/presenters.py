@@ -7,6 +7,7 @@ from typing import Any
 
 from unistax.agents.api.db.models import (
     KnowledgeEdgeRecord,
+    SwarmRecord,
     TaskRecord,
     WorkflowRecord,
 )
@@ -16,14 +17,20 @@ from unistax.agents.api.schemas import (
     AgentResponse,
     KnowledgeEdgeResponse,
     KnowledgeNodeResponse,
+    SwarmResponse,
+    SwarmStepResponse,
+    SwarmSummary,
     TaskResponse,
     TeamResponse,
     WorkflowResponse,
     WorkflowStatusResponse,
     WorkflowStepResponse,
 )
+from unistax.agents.api.services.swarm import assemble_result
 from unistax.agents.base import Agent
 from unistax.agents.intelligence.knowledge_graph import KnowledgeEdge, KnowledgeNode, RelationType
+from unistax.agents.llm import Usage
+from unistax.agents.swarm.plan import Plan
 from unistax.agents.team import Team
 
 
@@ -168,4 +175,45 @@ def edge_response(edge: KnowledgeEdge | KnowledgeEdgeRecord) -> KnowledgeEdgeRes
         weight=edge.weight,
         created_by=edge.created_by,
         created_at=as_utc(edge.created_at),  # type: ignore[arg-type]
+    )
+
+
+def swarm_summary(record: SwarmRecord) -> SwarmSummary:
+    """The list view of a swarm (no per-step detail)."""
+    return SwarmSummary(
+        swarm_id=record.id,
+        goal=record.goal,
+        status=record.status,
+        workflow_id=record.workflow_id,
+        error=record.error,
+        submitted_by=record.submitted_by,
+        usage=record.usage or {},
+        created_at=as_utc(record.created_at),  # type: ignore[arg-type]
+        started_at=as_utc(record.started_at),
+        completed_at=as_utc(record.completed_at),
+        duration_seconds=duration_seconds(record.started_at, record.completed_at),
+    )
+
+
+def swarm_response(record: SwarmRecord, workflow: WorkflowRecord | None) -> SwarmResponse:
+    """A swarm with its steps; a running swarm shows live progress from its workflow."""
+    base = swarm_summary(record).model_dump()
+    steps: list[SwarmStepResponse] = []
+    final = review = None
+    partial = False
+    rationale = None
+
+    if record.plan:
+        plan = Plan.model_validate(record.plan)
+        rationale = plan.rationale
+        data = record.result or assemble_result(
+            plan, (workflow.progress if workflow else None) or {}, Usage(), 0
+        )
+        steps = [
+            SwarmStepResponse(step_id=step_id, **step) for step_id, step in data["steps"].items()
+        ]
+        final, review, partial = data["final"], data["review"], data["partial"]
+
+    return SwarmResponse(
+        **base, plan_rationale=rationale, steps=steps, final=final, review=review, partial=partial
     )

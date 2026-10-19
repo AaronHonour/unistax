@@ -18,6 +18,7 @@ from unistax.agents.base import (
     TaskFailedEvent,
 )
 from unistax.agents.orchestrator import WorkflowExecutedEvent
+from unistax.agents.swarm.events import SwarmFinishedEvent
 from unistax.events import Event, EventBus
 from unistax.logging import get_logger
 
@@ -31,6 +32,7 @@ EVENT_NAMES: dict[type[Event], str] = {
     AgentMessageEvent: "agent_message",
     CollaborationRequestEvent: "collaboration_requested",
     WorkflowExecutedEvent: "workflow_finished",
+    SwarmFinishedEvent: "swarm_finished",
 }
 KNOWN_EVENT_TYPES = frozenset(EVENT_NAMES.values())
 # Inter-agent message contents can be sensitive, so they need a higher role.
