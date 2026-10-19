@@ -13,7 +13,7 @@ from .manager import get_cache
 def memoize(
     ttl: int | None = None,
     key_prefix: str = "",
-    key_func: Callable[..., Any]| None = None,
+    key_func: Callable[..., Any] | None = None,
 ) -> Callable[..., Any]:
     """Decorator for memoizing function results.
 

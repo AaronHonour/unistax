@@ -3,7 +3,7 @@
 Provides request/response middleware pipeline with:
 - Middleware chain execution
 - Request/response context
-- Built-in middleware (logging, metrics, auth, etc.)
+- Built-in middleware (logging, metrics, auth, security, rate limiting, CSRF, etc.)
 """
 
 from .builtin import (
@@ -11,6 +11,7 @@ from .builtin import (
     ErrorHandlerMiddleware,
     LoggingMiddleware,
     MetricsMiddleware,
+    SecurityHeadersMiddleware,
 )
 from .pipeline import Middleware, MiddlewarePipeline, NextHandler, Request, Response
 
@@ -24,4 +25,5 @@ __all__ = [
     "MetricsMiddleware",
     "ErrorHandlerMiddleware",
     "CORSMiddleware",
+    "SecurityHeadersMiddleware",
 ]

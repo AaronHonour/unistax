@@ -110,9 +110,64 @@ jobs:
           cd frontend
           npm run build
 
+  agents-tests:
+    name: Agent Framework & API Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agents
+          POSTGRES_PASSWORD: agents
+          POSTGRES_DB: agents_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agents -d agents_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          cd python
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,api,agents-api,security,database]"
+
+      - name: Lint agent code
+        run: |
+          cd python
+          ruff check src/unistax
+          black --check src/unistax
+
+      - name: Run tests (SQLite)
+        run: |
+          cd python
+          pytest tests --tb=short
+
+      - name: Run API tests (PostgreSQL)
+        env:
+          AGENT_API_TEST_DATABASE_URL: postgresql+asyncpg://agents:agents@localhost:5432/agents_test
+        run: |
+          cd python
+          pytest tests/agents/api tests/agents/datasource --tb=short -p no:randomly
+
   all-checks-passed:
     name: All Checks Passed
-    needs: [backend-tests, frontend-tests]
+    needs: [backend-tests, agents-tests, frontend-tests]
     runs-on: ubuntu-latest
     steps:
       - name: All checks passed

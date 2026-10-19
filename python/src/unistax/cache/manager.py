@@ -4,12 +4,15 @@ Provides unified interface for caching with multiple backends.
 """
 
 import json
+import logging
 import pickle
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .backends import CacheBackend, InMemoryCache, MemcachedBackend, RedisBackend
+
+logger = logging.getLogger(__name__)
 
 
 class CacheManager:
@@ -136,7 +139,13 @@ class CacheManager:
 
         try:
             return self._deserialize(data)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Failed to deserialize cached value for key %s: %s",
+                key,
+                e,
+                exc_info=True,
+            )
             return default
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> bool:

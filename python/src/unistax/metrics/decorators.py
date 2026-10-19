@@ -35,7 +35,9 @@ def timer(name: str, labels: dict[str, str] | None = None) -> Callable[..., Any]
     return decorator
 
 
-def counter(name: str, value: float = 1.0, labels: dict[str, str] | None = None) -> Callable[..., Any]:  # noqa: E501
+def counter(
+    name: str, value: float = 1.0, labels: dict[str, str] | None = None
+) -> Callable[..., Any]:  # noqa: E501
     """Decorator to increment counter on function call.
 
     Args:
@@ -61,7 +63,7 @@ def counter(name: str, value: float = 1.0, labels: dict[str, str] | None = None)
     return decorator
 
 
-def gauge(name: str, value_func: Callable[..., Any]| None = None) -> Callable[..., Any]:
+def gauge(name: str, value_func: Callable[..., Any] | None = None) -> Callable[..., Any]:
     """Decorator to set gauge value based on function result.
 
     Args:

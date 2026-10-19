@@ -15,9 +15,7 @@ def set_audit_logger(logger: AuditLogger) -> None:
     _audit_logger = logger
 
 
-def audit(
-    action: AuditAction, resource: str
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def audit(action: AuditAction, resource: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator to audit function calls."""
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:

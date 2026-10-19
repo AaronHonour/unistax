@@ -1,7 +1,7 @@
 """Feature flag manager."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +26,8 @@ class Feature:
     description: str | None = None
     rollout_percentage: int = 0
     targeting_rules: dict[str, Any] = field(default_factory=dict[str, Any])
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class FeatureManager:
@@ -80,7 +80,7 @@ class FeatureManager:
         """
         feature = self.storage.get(feature_name) or Feature(name=feature_name)
         feature.status = FeatureStatus.ENABLED
-        feature.updated_at = datetime.utcnow()
+        feature.updated_at = datetime.now(timezone.utc)
         self.storage.save(feature)
 
     def disable(self, feature_name: str) -> None:
@@ -92,7 +92,7 @@ class FeatureManager:
         feature = self.storage.get(feature_name)
         if feature:
             feature.status = FeatureStatus.DISABLED
-            feature.updated_at = datetime.utcnow()
+            feature.updated_at = datetime.now(timezone.utc)
             self.storage.save(feature)
 
     def set_rollout(self, feature_name: str, percentage: int) -> None:
@@ -105,7 +105,7 @@ class FeatureManager:
         feature = self.storage.get(feature_name) or Feature(name=feature_name)
         feature.status = FeatureStatus.ROLLOUT
         feature.rollout_percentage = max(0, min(100, percentage))
-        feature.updated_at = datetime.utcnow()
+        feature.updated_at = datetime.now(timezone.utc)
         self.storage.save(feature)
 
     def _check_rollout(

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from enum import Enum
 
 from opentelemetry.exporter.jaeger.thrift import JaegerExporter  # type: ignore[import-not-found]
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore[import-not-found]
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found]
+    OTLPSpanExporter,
+)
 from opentelemetry.exporter.zipkin.json import ZipkinExporter  # type: ignore[import-not-found]
 from opentelemetry.sdk.trace.export import (  # type: ignore[import-not-found]
     ConsoleSpanExporter,

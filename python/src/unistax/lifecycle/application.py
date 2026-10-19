@@ -1,6 +1,7 @@
 """Application lifecycle management."""
 
 import asyncio
+import logging
 import signal
 import sys
 from collections.abc import Callable
@@ -9,6 +10,8 @@ from typing import Any
 
 from .health import HealthCheck, HealthCheckRegistry
 from .hooks import LifecycleHook
+
+logger = logging.getLogger(__name__)
 
 
 class LifecycleEvent(str, Enum):
@@ -83,7 +86,9 @@ class Application:
         self._shutdown_hooks.append(hook)
         return func
 
-    def health_check(self, name: str | None = None, check_type: str = "readiness") -> Callable[..., Any]:  # noqa: E501
+    def health_check(
+        self, name: str | None = None, check_type: str = "readiness"
+    ) -> Callable[..., Any]:  # noqa: E501
         """Register health check.
 
         Args:
@@ -110,7 +115,7 @@ class Application:
         if self._is_running:
             return
 
-        print(f"Starting application: {self.name}")
+        logger.info("Starting application: %s", self.name)
 
         # Install signal handlers
         self._install_signal_handlers()
@@ -119,13 +124,13 @@ class Application:
         for hook in self._startup_hooks:
             try:
                 await hook.execute()
-                print(f"✓ Startup hook executed: {hook.func.__name__}")
+                logger.info("Startup hook executed: %s", hook.func.__name__)
             except Exception as e:
-                print(f"✗ Startup hook failed: {hook.func.__name__}: {e}")
+                logger.error("Startup hook failed: %s: %s", hook.func.__name__, e)
                 raise
 
         self._is_running = True
-        print(f"✓ Application started: {self.name}")
+        logger.info("Application started: %s", self.name)
 
     async def stop(self) -> None:
         """Stop the application.
@@ -135,24 +140,24 @@ class Application:
         if not self._is_running:
             return
 
-        print(f"Stopping application: {self.name}")
+        logger.info("Stopping application: %s", self.name)
         self._is_running = False
 
         # Run shutdown hooks with timeout
         try:
             await asyncio.wait_for(self._run_shutdown_hooks(), timeout=self.shutdown_timeout)
-            print(f"✓ Application stopped gracefully: {self.name}")
+            logger.info("Application stopped gracefully: %s", self.name)
         except asyncio.TimeoutError:
-            print(f"⚠ Shutdown timeout exceeded: {self.name}")
+            logger.warning("Shutdown timeout exceeded: %s", self.name)
 
     async def _run_shutdown_hooks(self) -> None:
         """Run all shutdown hooks."""
         for hook in reversed(self._shutdown_hooks):  # Reverse order
             try:
                 await hook.execute()
-                print(f"✓ Shutdown hook executed: {hook.func.__name__}")
+                logger.info("Shutdown hook executed: %s", hook.func.__name__)
             except Exception as e:
-                print(f"⚠ Shutdown hook error: {hook.func.__name__}: {e}")
+                logger.warning("Shutdown hook error: %s: %s", hook.func.__name__, e)
                 # Continue with other hooks
 
     def _install_signal_handlers(self) -> None:
@@ -160,8 +165,8 @@ class Application:
         if self._signal_handlers_installed:
             return
 
-        def signal_handler(sig: Any, frame: Any) -> None:
-            print(f"\nReceived signal {sig}, initiating graceful shutdown...")
+        def signal_handler(sig: Any, _frame: Any) -> None:
+            logger.info("Received signal %s, initiating graceful shutdown...", sig)
             asyncio.create_task(self.stop())
 
         # Only on Unix systems

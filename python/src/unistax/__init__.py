@@ -1,4 +1,4 @@
-"""Backend Toolkit - Enterprise-grade Python toolkit for backend development.
+"""Unistax - High-performance composable full-stack framework.
 
 This package provides composable, configuration-driven modules for:
 - Configuration management
@@ -9,7 +9,7 @@ This package provides composable, configuration-driven modules for:
 - Service dependency discovery and analysis
 """
 
-__version__ = "0.1.0"
+__version__ = "0.5.0"
 __all__ = [
     "config",
     "logging",

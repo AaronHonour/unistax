@@ -1,6 +1,6 @@
 {
   "name": "@unistax/frontend",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Composable frontend components for building unified full-stack applications",
   "main": "dist/index.js",
   "module": "dist/index.esm.js",

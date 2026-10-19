@@ -57,7 +57,10 @@ class CircuitBreaker:
             @wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 if self.state == CircuitState.OPEN:
-                    if self.last_failure_time is not None and time.time() - self.last_failure_time > self.timeout:  # noqa: E501
+                    if (
+                        self.last_failure_time is not None
+                        and time.time() - self.last_failure_time > self.timeout
+                    ):  # noqa: E501
                         self.state = CircuitState.HALF_OPEN
                         self.half_open_calls = 0
                     else:

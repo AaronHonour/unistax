@@ -3,16 +3,16 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "backend-toolkit"
+name = "unistax"
 version = "0.5.0"
-description = "High-performance composable backend toolkit: Database, Tasks, Tracing, API, DTOs, Pagination, Audit, Features, Storage, Queue, Notifications, Query, Algorithms - everything needed for production-ready backend applications (100K RPS capable)"
+description = "High-performance composable full-stack framework: Database, Tasks, Tracing, API, DTOs, Pagination, Audit, Features, Storage, Queue, Notifications, Query, Algorithms - everything needed for production-ready applications (100K RPS capable)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Aaron Honour", email = "aaron@example.com"}
 ]
-keywords = ["backend", "toolkit", "api", "database", "tasks", "tracing", "audit", "features", "storage", "queue", "notifications"]
+keywords = ["unistax", "full-stack", "backend", "toolkit", "api", "database", "tasks", "tracing", "audit", "features", "storage", "queue", "notifications"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -172,9 +172,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/backend-toolkit"
-Documentation = "https://github.com/yourusername/backend-toolkit#readme"
-Repository = "https://github.com/yourusername/backend-toolkit"
+Homepage = "https://github.com/AaronHonour/unistax"
+Documentation = "https://github.com/AaronHonour/unistax#readme"
+Repository = "https://github.com/AaronHonour/unistax"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -208,7 +208,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=src/toolkit --cov-report=term-missing"
+addopts = "-v --cov=src/unistax --cov-report=term-missing"
 markers = [
     "benchmark: marks tests as benchmark tests (deselect with '-m \"not benchmark\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

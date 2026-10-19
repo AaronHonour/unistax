@@ -15,7 +15,9 @@ class Request:
     headers: dict[str, str] = field(default_factory=dict[str, Any])
     query_params: dict[str, str] = field(default_factory=dict[str, Any])
     body: Any = None
-    context: dict[str, Any] = field(default_factory=dict[str, Any])  # For passing data between middleware  # noqa: E501
+    context: dict[str, Any] = field(
+        default_factory=dict[str, Any]
+    )  # For passing data between middleware  # noqa: E501
 
 
 @dataclass

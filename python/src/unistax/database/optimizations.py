@@ -71,7 +71,7 @@ class QueryCache:
         }
         self._lock = threading.RLock()
 
-    def _make_key(self, query: str, params: dict[str, Any]| None = None) -> str:
+    def _make_key(self, query: str, params: dict[str, Any] | None = None) -> str:
         """Create cache key from query and params.
 
         Args:
@@ -84,7 +84,7 @@ class QueryCache:
         key_data = f"{query}:{params}" if params else query
         return hashlib.sha256(key_data.encode()).hexdigest()[:16]
 
-    def get(self, query: str, params: dict[str, Any]| None = None) -> Any | None:
+    def get(self, query: str, params: dict[str, Any] | None = None) -> Any | None:
         """Get cached query result.
 
         Args:
@@ -109,7 +109,9 @@ class QueryCache:
                 self._stats["misses"] += 1
                 return None
 
-    def set(self, query: str, result: Any, params: dict[str, Any]| None = None, ttl: int | None = None) -> None:  # noqa: E501
+    def set(
+        self, query: str, result: Any, params: dict[str, Any] | None = None, ttl: int | None = None
+    ) -> None:  # noqa: E501
         """Cache query result.
 
         Args:
@@ -158,7 +160,7 @@ class QueryCache:
 
         return result
 
-    def invalidate(self, query: str, params: dict[str, Any]| None = None) -> None:  # noqa: E501
+    def invalidate(self, query: str, params: dict[str, Any] | None = None) -> None:  # noqa: E501
         """Invalidate cached query.
 
         Args:
@@ -284,7 +286,7 @@ class QueryBatcher:
         self._params: list[dict[str, Any]] = []
         self._results: list[Any] = []
 
-    def add(self, query: str, params: dict[str, Any]| None = None) -> None:  # noqa: E501
+    def add(self, query: str, params: dict[str, Any] | None = None) -> None:  # noqa: E501
         """Add query to batch.
 
         Args:
@@ -357,7 +359,7 @@ class ReadWriteSplitter:
             self._current_replica = (self._current_replica + 1) % len(self._replicas)
             return replica
 
-    def execute_read(self, query: str, params: dict[str, Any]| None = None) -> Result:
+    def execute_read(self, query: str, params: dict[str, Any] | None = None) -> Result:
         """Execute read query on replica.
 
         Args:
@@ -371,7 +373,7 @@ class ReadWriteSplitter:
         stmt = text(query)
         return replica.execute(stmt, params or {})
 
-    def execute_write(self, query: str, params: dict[str, Any]| None = None) -> Result:
+    def execute_write(self, query: str, params: dict[str, Any] | None = None) -> Result:
         """Execute write query on master.
 
         Args:
@@ -484,7 +486,9 @@ class QueryProfiler:
         self._queries: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
-    def profile_query(self, query: str, duration: float, params: dict[str, Any]| None = None) -> None:  # noqa: E501
+    def profile_query(
+        self, query: str, duration: float, params: dict[str, Any] | None = None
+    ) -> None:  # noqa: E501
         """Record query execution.
 
         Args:

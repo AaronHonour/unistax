@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
@@ -54,8 +54,8 @@ class ServiceNode:
     endpoints: list[str] = field(default_factory=list[Any])
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
     health_score: float = 1.0
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @classmethod
     def create(
@@ -79,7 +79,7 @@ class ServiceNode:
         if not 0.0 <= score <= 1.0:
             raise ValueError("Health score must be between 0.0 and 1.0")
         self.health_score = score
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
 
 @dataclass
@@ -124,8 +124,8 @@ class DependencyEdge:
     error_rate: float = 0.0  # 0.0 to 1.0
     request_rate: float = 0.0  # Requests per second
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @classmethod
     def create(
@@ -161,7 +161,7 @@ class DependencyEdge:
             self.error_rate = error_rate
         if request_rate is not None:
             self.request_rate = request_rate
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
 
 class DirectedGraph:

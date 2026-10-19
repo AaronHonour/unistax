@@ -1,0 +1,10 @@
+# Example npm configuration file
+# Copy this to ~/.npmrc and fill in your token
+# DO NOT commit this file with actual credentials!
+
+# For publishing to npm registry
+//registry.npmjs.org/:_authToken=npm_xxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Or use for npm login
+# registry=https://registry.npmjs.org/
+# always-auth=true

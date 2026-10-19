@@ -4,6 +4,7 @@ Provides auto-wiring, lifetime management, and factory registration.
 """
 
 import inspect
+import logging
 import threading
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -11,6 +12,8 @@ from enum import Enum
 from typing import Any, TypeVar, get_type_hints
 
 from .exceptions import CircularDependencyError, DependencyResolutionError
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -33,7 +36,7 @@ class ServiceDescriptor:
         self,
         service_type: type,
         implementation_type: type | None = None,
-        factory: Callable[..., Any]| None = None,
+        factory: Callable[..., Any] | None = None,
         instance: Any | None = None,
         lifetime: Lifetime = Lifetime.TRANSIENT,
     ) -> None:
@@ -274,7 +277,12 @@ class Container:
                         return False
 
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(
+                "Cannot auto-wire type %s: %s",
+                service_type.__name__ if hasattr(service_type, "__name__") else service_type,
+                e,
+            )
             return False
 
     def create_scope(self) -> "Container":
@@ -337,9 +345,16 @@ def inject(func: Callable[..., Any]) -> Callable[..., Any]:
             if param_type and param_name not in kwargs:
                 try:
                     kwargs[param_name] = container.resolve(param_type)
-                except Exception:
+                except Exception as e:
                     if param.default == inspect.Parameter.empty:
                         raise
+                    logger.debug(
+                        "Could not resolve dependency %s for parameter %s in function %s: %s",
+                        param_type,
+                        param_name,
+                        func.__name__,
+                        e,
+                    )
 
         return func(*args, **kwargs)
 

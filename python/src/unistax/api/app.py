@@ -155,7 +155,9 @@ class APIApplication:
                 },
             )
 
-    def include_router(self, router: "APIRouter", prefix: str = "", tags: list[str] | None = None) -> None:  # noqa: E501
+    def include_router(
+        self, router: "APIRouter", prefix: str = "", tags: list[str] | None = None
+    ) -> None:  # noqa: E501
         """Include router in application.
 
         Args:

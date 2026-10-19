@@ -1,6 +1,6 @@
 """Database base models and mixins."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Boolean, Column, DateTime, Integer  # type: ignore[import-not-found]
@@ -24,7 +24,7 @@ class TimestampMixin:
         Returns:
             SQLAlchemy column
         """
-        return Column(DateTime, default=datetime.utcnow, nullable=False)
+        return Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     @declared_attr  # type: ignore[misc]
     def updated_at(cls) -> Column:
@@ -35,8 +35,8 @@ class TimestampMixin:
         """
         return Column(
             DateTime,
-            default=datetime.utcnow,
-            onupdate=datetime.utcnow,
+            default=lambda: datetime.now(timezone.utc),
+            onupdate=lambda: datetime.now(timezone.utc),
             nullable=False,
         )
 
@@ -64,7 +64,7 @@ class SoftDeleteMixin:
 
     def soft_delete(self) -> None:
         """Soft delete the record."""
-        self.deleted_at = datetime.utcnow()
+        self.deleted_at = datetime.now(timezone.utc)
         self.is_deleted = True
 
     def restore(self) -> None:

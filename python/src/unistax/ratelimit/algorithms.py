@@ -63,8 +63,11 @@ class SlidingWindow:
         self.window_size = window_size
         self.requests: deque[float] = deque()
 
-    def is_allowed(self) -> bool:
+    def is_allowed(self, tokens: int = 1) -> bool:
         """Check if request is allowed.
+
+        Args:
+            tokens: Number of requests this call counts as
 
         Returns:
             True if allowed
@@ -76,8 +79,8 @@ class SlidingWindow:
         while self.requests and self.requests[0] < cutoff:
             self.requests.popleft()
 
-        if len(self.requests) < self.limit:
-            self.requests.append(now)
+        if len(self.requests) + tokens <= self.limit:
+            self.requests.extend([now] * tokens)
             return True
 
         return False

@@ -126,7 +126,7 @@ class Logger:
             return
 
         # Merge context with extra fields
-        context_data = log_context.get()
+        context_data = log_context.get() or {}
         extra_data = extra or {}
         merged_extra = {**context_data, **extra_data}  # type: ignore[dict-item]
 
@@ -177,8 +177,8 @@ class LoggerFactory:
     def create(
         name: str,
         level: str = "INFO",
-        handlers: list[Any]| None = None,
-        filters: list[Any]| None = None,
+        handlers: list[Any] | None = None,
+        filters: list[Any] | None = None,
     ) -> Logger:
         """Create configured logger.
 

@@ -97,6 +97,30 @@ tracing = [
     "opentelemetry-exporter-otlp>=1.15.0",
 ]
 
+# Agent framework (numpy powers the intelligence modules)
+agents = [
+    "numpy>=1.24",
+]
+
+# Read-only PostgreSQL data source for the Steward/Engineer agents (no web framework needed)
+agents-postgres = [
+    "numpy>=1.24",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+]
+
+# Agent REST/WebSocket API service (single-process; see AGENTS.md > Running the API)
+agents-api = [
+    "numpy>=1.24",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.19.0",  # SQLite (development)
+    "asyncpg>=0.29.0",  # PostgreSQL (production)
+    "pyjwt>=2.8.0",
+    "alembic>=1.13.0",  # schema migrations
+]
+
 # API framework support
 api = [
     "fastapi>=0.109.0",
@@ -176,12 +200,15 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/backend-toolkit"
-Documentation = "https://github.com/yourusername/backend-toolkit#readme"
-Repository = "https://github.com/yourusername/backend-toolkit"
+Homepage = "https://github.com/AaronHonour/unistax"
+Documentation = "https://github.com/AaronHonour/unistax#readme"
+Repository = "https://github.com/AaronHonour/unistax"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"unistax.agents.api.migrations" = ["script.py.mako"]
 
 [tool.black]
 line-length = 100
@@ -205,6 +232,17 @@ select = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"  # Google-style docstrings
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency declarations are meant to be call expressions in defaults
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Security"]
+
+[tool.ruff.lint.per-file-ignores]
+# Routes, request/response schemas and ORM models are documented through their
+# OpenAPI summaries/field names; per-method docstrings would only restate them.
+"src/unistax/agents/api/**" = ["D101", "D102", "D103", "D107"]
+# Long lines are SQL text; wrapping them would make the queries harder to read.
+"src/unistax/agents/connectors/postgres.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"
